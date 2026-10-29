@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -67,6 +68,8 @@ func (f *fakeSource) ThumbsUp(string) (int, bool, error) {
 }
 
 var testNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+
+var testMeta = meta{Version: "v9.9.9", GeneratedAt: testNow, Weights: defaultWeights}
 
 func day(s string) time.Time {
 	t, err := time.Parse(time.DateOnly, s)
@@ -622,7 +625,7 @@ func TestRenderFlagsInHeader(t *testing.T) {
 	m := Metrics{User: "u", Repo: "o/r", Global: Global{AccountCreated: testNow, AccountAgeDays: 6,
 		PRsOpened: 50, PRsMerged: 26, RecentPRs: 50, RecentMerged: 26, RecentRepos: 35, RecentSampled: 50}, Threads: 1}
 	var buf bytes.Buffer
-	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(buf.String(), "\n")
@@ -635,12 +638,93 @@ func TestRenderFlagsInHeader(t *testing.T) {
 func TestRenderJSONFlags(t *testing.T) {
 	var buf bytes.Buffer
 	m := Metrics{User: "u", Repo: "o/r"}
-	if err := renderJSON(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderJSON(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	// An empty list, not null, so scripts can always iterate it.
 	if !strings.Contains(buf.String(), `"flags": []`) {
 		t.Errorf("missing empty flags array:\n%s", buf.String())
+	}
+}
+
+func TestParseArgsVersion(t *testing.T) {
+	got, err := parseArgs([]string{"--version"}, io.Discard)
+	if err != nil || !got.version {
+		t.Errorf("parseArgs(--version) = %+v, %v", got, err)
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"--version"}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.HasPrefix(out.String(), "gh-averyindex ") {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestBuildInfoString(t *testing.T) {
+	tests := []struct {
+		b    buildInfo
+		want string
+	}{
+		{buildInfo{Version: "v0.4.0", Commit: "2754283", Date: day("2026-10-29")}, "gh-averyindex v0.4.0 (2754283, 2026-10-29)"},
+		{buildInfo{Version: "dev", Commit: "2754283"}, "gh-averyindex dev (2754283)"},
+		{buildInfo{Version: "dev"}, "gh-averyindex dev"},
+	}
+	for _, tt := range tests {
+		if got := tt.b.String(); got != tt.want {
+			t.Errorf("String() = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestVersionOverride(t *testing.T) {
+	old := version
+	t.Cleanup(func() { version = old })
+	version = "v1.2.3"
+	if got := currentBuild().Version; got != "v1.2.3" {
+		t.Errorf("currentBuild().Version = %q, want v1.2.3", got)
+	}
+}
+
+func TestRenderTextFooter(t *testing.T) {
+	var buf bytes.Buffer
+	m := Metrics{User: "u", Repo: "o/r"}
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if want := "averyindex v9.9.9 · 2026-10-29 12:00 UTC"; lines[len(lines)-1] != want {
+		t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+	}
+}
+
+func TestRenderJSONMeta(t *testing.T) {
+	var buf bytes.Buffer
+	m := Metrics{User: "u", Repo: "o/r"}
+	if err := renderJSON(&buf, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SchemaVersion int                `json:"schema_version"`
+		Version       string             `json:"version"`
+		GeneratedAt   time.Time          `json:"generated_at"`
+		Weights       map[string]float64 `json:"weights"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != schemaVersion || got.Version != "v9.9.9" || !got.GeneratedAt.Equal(testNow) {
+		t.Errorf("meta = %+v", got)
+	}
+	// Every weight is recorded, so an old score can be recomputed.
+	if len(got.Weights) != reflect.TypeFor[Weights]().NumField() {
+		t.Errorf("weights has %d fields, Weights has %d: %v", len(got.Weights), reflect.TypeFor[Weights]().NumField(), got.Weights)
+	}
+	if got.Weights["code"] != defaultWeights.Code || got.Weights["not_landing"] != defaultWeights.NotLanding {
+		t.Errorf("weights = %v", got.Weights)
 	}
 }
 
@@ -821,7 +905,7 @@ func TestRenderText(t *testing.T) {
 			RecentPRs: 150, RecentRepos: 2, RecentTopRepo: "o/r", RecentTopCount: 70, RecentSampled: 100},
 	}
 	var buf bytes.Buffer
-	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -869,7 +953,7 @@ func TestRenderTextDriveBy(t *testing.T) {
 	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 2, PRsOpen: 2,
 		FirstAuthored: &searchItem{Number: 1, CreatedAt: day("2026-10-01"), IsPR: true}}
 	var buf bytes.Buffer
-	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -883,7 +967,7 @@ func TestRenderTextDriveBy(t *testing.T) {
 func TestRenderTextNoActivity(t *testing.T) {
 	var buf bytes.Buffer
 	m := Metrics{User: "u", Repo: "o/r"}
-	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -901,7 +985,7 @@ func TestRenderTextNoActivity(t *testing.T) {
 func TestRenderJSON(t *testing.T) {
 	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 3, PRsMerged: 3}
 	var buf bytes.Buffer
-	if err := renderJSON(&buf, m, score(m, defaultWeights)); err != nil {
+	if err := renderJSON(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	var got map[string]any

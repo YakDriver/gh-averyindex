@@ -26,6 +26,16 @@ Score
 
 The score is for a quick read, not a verdict. Look at the breakdown.
 
+## Why trust it
+
+AI tools made it cheap to produce plausible pull requests, comments, and issues. They didn't make it cheap to get a maintainer to merge your code unchanged, or to get other people to upvote your bug report or contribute to your project. averyindex weighs those signals most.
+
+- **It counts other people's judgments.** Merged PRs, rework, upvotes, and contributors to a user's projects all depend on someone else. Things a person produces alone (comments, issues) count for less, and PRs they merge into their own repositories don't count.
+- **It shows its work.** Every point in the score is on a line in the report, with the count behind it. If you disagree with the number, you can see exactly why it came out that way.
+- **Anyone gets the same answer.** Activity outside the scored repo comes only from public repositories, and the weights are fixed and published in [`score.go`](score.go). Every report ends with the version and time it was generated, and `--json` also records the weights, so an old score can be checked.
+- **It reports. It doesn't decide.** The score is a quick read for a maintainer, not a gate. There's no threshold that admits or rejects anyone. [Flags](#flags) point out patterns worth a closer look and don't change the score.
+- **It says what it can't see.** See [Limits](#limits).
+
 ## Install
 
 ```sh
@@ -36,9 +46,12 @@ gh extension install YakDriver/gh-averyindex
 
 ```sh
 gh averyindex [-R owner/repo] [--json] <user>
+gh averyindex --version
 ```
 
 Run it inside a clone to score against that repository, or pass `-R`. It uses your existing `gh` login, so it works on any repository you can read.
+
+`--json` output includes `schema_version`, `version`, `generated_at`, and `weights` alongside the metrics, score, and flags. `schema_version` changes when a field is removed or changes meaning.
 
 ## The report
 
@@ -147,6 +160,19 @@ Because open PRs are neutral, an account whose spray PRs are all still open isn'
 | Core | 150 |
 
 The weights and tiers in [`score.go`](score.go) are a first guess.
+
+## Limits
+
+- **Only GitHub.** Work on other forges, mailing lists, or inside companies isn't visible.
+- **Private repositories are excluded** from everything outside the scored repo.
+- **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control.
+- **Search returns at most 1,000 results.** Upvotes received and the repo count for recent PRs can be partial. The report says so when they are.
+- **Rework is sampled** from 5 merged PRs, and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
+- **"First authored" ignores comments.** It's the user's oldest issue or PR in the repo.
+- **Contributors to own projects** count distinct non-bot accounts, so a user's own automation account registered as a regular user counts once.
+- **Results change over time** as PRs merge and close. Check the timestamp at the end of the report.
+
+Known gaps being worked on: [#6](https://github.com/YakDriver/gh-averyindex/issues/6) (the rework sample is the most recently opened merged PRs, not the most recently merged), [#7](https://github.com/YakDriver/gh-averyindex/issues/7) (self-upvotes count, and reviews also count as threads), [#8](https://github.com/YakDriver/gh-averyindex/issues/8) (bot accounts aren't searched correctly).
 
 ## Costs
 

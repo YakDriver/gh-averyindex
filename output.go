@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-func renderText(w io.Writer, m Metrics, r Result) error {
+func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 	fmt.Fprintf(w, "%s in %s  ·  %s  ·  averyindex %d\n", m.User, m.Repo, r.Tier, r.Score)
 	for _, f := range r.Flags {
 		fmt.Fprintf(w, "  ⚠ %s\n", f.Message)
@@ -68,6 +68,8 @@ func renderText(w io.Writer, m Metrics, r Result) error {
 		fmt.Fprintf(w, "    %s%9s  %7s\n", pad(labels[i], width-2), n, signed(c.Points))
 	}
 	fmt.Fprintf(w, "  %s%9s  %7d\n", pad("averyindex", width), r.Tier, r.Score)
+
+	fmt.Fprintf(w, "\naveryindex %s · %s\n", md.Version, md.GeneratedAt.UTC().Format("2006-01-02 15:04 MST"))
 	return nil
 }
 
@@ -164,13 +166,17 @@ func renderPRs(w io.Writer, m Metrics) error {
 	return nil
 }
 
-func renderJSON(w io.Writer, m Metrics, r Result) error {
+func renderJSON(w io.Writer, m Metrics, r Result, md meta) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(struct {
+		SchemaVersion int       `json:"schema_version"`
+		Version       string    `json:"version"`
+		GeneratedAt   time.Time `json:"generated_at"`
 		Metrics
 		Result
-	}{m, r})
+		Weights Weights `json:"weights"`
+	}{schemaVersion, md.Version, md.GeneratedAt.UTC(), m, r, md.Weights})
 }
 
 func describe(item *searchItem) string {
