@@ -4,7 +4,7 @@ A [gh](https://cli.github.com/) extension that shows how helpful a user has been
 
 ```console
 $ gh averyindex johnthedev97
-johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  averyindex 68
+johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  ➜ averyindex 68
 
 Participation
   Issues opened      0
@@ -27,7 +27,7 @@ Score
     Code credit (3 merged × 0.63)                 1.9    +18.3
     Upvotes received                               49    +28.2
     ...
-  averyindex                                  Regular       68
+➜ averyindex                                  Regular       68
 
 averyindex v0.3.0 · 2026-10-29 17:54 UTC
 ```
@@ -88,7 +88,7 @@ Flags appear under the header line when something deserves a closer look. They s
 | Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
 
 ```console
-hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  averyindex -26
+hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  ➜ averyindex -26
   ⚠ Recent PRs mostly not landing: 3 of 26 resolved merged in 30 days
   ⚠ New account: 17 days old, 109 PRs across 23 repos in 30 days, 3 merged so far
   ⚠ Drive-by: PRs here, none merged, and no issues, comments, or reviews
@@ -111,7 +111,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 
 ## Costs
 
-One user takes about 15 search API calls plus a few other requests. That's usually 10 to 15 seconds, and up to about a minute for someone with thousands of issues and PRs in the repo. In a terminal, a spinner shows while it works, and the score is highlighted in the report. Neither appears when output is piped or redirected. `NO_COLOR` turns off the highlight, and `TERM=dumb` switches the spinner to ASCII.
+One user takes about 15 search API calls plus a few other requests. That's usually 10 to 15 seconds, and up to about a minute for someone with thousands of issues and PRs in the repo. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
 
 If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 

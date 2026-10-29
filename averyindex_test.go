@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -943,6 +944,33 @@ func TestTransientWait(t *testing.T) {
 	}
 }
 
+func TestRenderTextPointsAtScore(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 3, PRsMerged: 3}
+	var buf bytes.Buffer
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(buf.String(), "\n")
+	if want := "u in o/r  ·  Contributor  ·  ➜ averyindex 24"; lines[0] != want {
+		t.Errorf("header = %q, want %q", lines[0], want)
+	}
+	// The final score row lines up with the component rows above it, even
+	// with an 11-character tier like "Contributor".
+	var row, above string
+	for i, l := range lines {
+		if strings.HasPrefix(l, "➜ averyindex") {
+			row, above = l, lines[i-1]
+		}
+	}
+	if row == "" {
+		t.Fatalf("no score row:\n%s", buf.String())
+	}
+	if utf8.RuneCountInString(row) != utf8.RuneCountInString(above) {
+		t.Errorf("score row is %d columns, row above is %d:\n%s\n%s",
+			utf8.RuneCountInString(row), utf8.RuneCountInString(above), above, row)
+	}
+}
+
 func TestSpinner(t *testing.T) {
 	var buf bytes.Buffer
 	sp := newSpinner(&buf, arcFrames, "Scoring u…")
@@ -1016,11 +1044,11 @@ func TestRenderTextHighlightsScore(t *testing.T) {
 	}
 	// The header score and the final score row are highlighted, and nothing
 	// else changes.
-	header := "u in o/r  ·  Contributor  ·  \033[1;36maveryindex 24\033[0m\n"
+	header := "u in o/r  ·  Contributor  ·  \033[1m➜ averyindex 24\033[0m\n"
 	if !strings.HasPrefix(color.String(), header) {
 		t.Errorf("header = %q", strings.SplitN(color.String(), "\n", 2)[0])
 	}
-	if got := strings.Count(color.String(), "\033[1;36m"); got != 2 {
+	if got := strings.Count(color.String(), "\033[1m"); got != 2 {
 		t.Errorf("%d highlights, want 2", got)
 	}
 	stripped := regexp.MustCompile("\033\\[[0-9;]*m").ReplaceAllString(color.String(), "")
