@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -58,9 +59,9 @@ type source interface {
 	Search(query, order string, n int) (total int, items []searchItem, err error)
 	// SearchPage returns one page (1-based) of 100 results for query.
 	SearchPage(query, order string, page int) (total int, items []searchItem, err error)
-	// MergedPRs returns the total count and up to n PRs matching query, with
-	// commits.
-	MergedPRs(query string, n int) (total int, prs []rawPR, err error)
+	// MergedPRs returns the total count of merged PRs matching query and the
+	// n most recently merged of them in repo, with commits.
+	MergedPRs(repo, query string, n int) (total int, prs []rawPR, err error)
 	// OwnedRepoStars returns the star counts of the user's public, non-fork
 	// repositories, at most the 100 most starred.
 	OwnedRepoStars(login string) ([]int, error)
@@ -93,6 +94,8 @@ func newGitHub(host string) (*gitHub, error) {
 type account struct {
 	Login     string    `json:"login"`
 	CreatedAt time.Time `json:"created_at"`
+	// Type is "User", "Bot", or "Organization".
+	Type string `json:"type"`
 }
 
 // Account looks up user, or returns an error if it doesn't exist.
@@ -257,89 +260,141 @@ func repoFromURL(u string) string {
 // maxCommits is how many commits per PR are fetched for rework.
 const maxCommits = 100
 
-const mergedPRsQuery = `
+// mergedCandidates is how many recently updated merged PRs are considered
+// when picking the most recently merged. Search can't sort by merge time, but
+// a PR's update time is at or after its merge time, so the most recently
+// merged PRs are near the top of the most recently updated. Extra candidates
+// cover old PRs that got a comment recently.
+const mergedCandidates = 25
+
+const mergedCandidatesQuery = `
 query($q: String!, $n: Int!) {
   search(query: $q, type: ISSUE, first: $n) {
     issueCount
-    nodes {
-      ... on PullRequest {
-        number
-        mergedAt
-        additions
-        deletions
-        commits(first: 100) {
-          totalCount
-          nodes {
-            commit {
-              additions
-              deletions
-              parents(first: 2) { totalCount }
-              authors(first: 10) { nodes { user { login } } }
-            }
-          }
-        }
-      }
+    nodes { ... on PullRequest { number mergedAt } }
+  }
+}`
+
+// prFields is what rework needs from each PR.
+const prFields = `
+number
+mergedAt
+additions
+deletions
+commits(first: 100) {
+  totalCount
+  nodes {
+    commit {
+      additions
+      deletions
+      parents(first: 2) { totalCount }
+      authors(first: 10) { nodes { user { login } } }
     }
   }
 }`
 
-func (g *gitHub) MergedPRs(query string, n int) (int, []rawPR, error) {
-	var resp struct {
-		Search struct {
-			IssueCount int
-			Nodes      []struct {
-				Number    int
-				MergedAt  time.Time
+type prNode struct {
+	Number    int
+	MergedAt  time.Time
+	Additions int
+	Deletions int
+	Commits   struct {
+		TotalCount int
+		Nodes      []struct {
+			Commit struct {
 				Additions int
 				Deletions int
-				Commits   struct {
-					TotalCount int
-					Nodes      []struct {
-						Commit struct {
-							Additions int
-							Deletions int
-							Parents   struct{ TotalCount int }
-							Authors   struct {
-								Nodes []struct {
-									User *struct{ Login string }
-								}
-							}
-						}
+				Parents   struct{ TotalCount int }
+				Authors   struct {
+					Nodes []struct {
+						User *struct{ Login string }
 					}
 				}
 			}
 		}
 	}
-	vars := map[string]any{"q": query, "n": n}
-	if err := g.gqlDo(mergedPRsQuery, vars, &resp); err != nil {
+}
+
+func (n prNode) raw() rawPR {
+	pr := rawPR{
+		Number:           n.Number,
+		MergedAt:         n.MergedAt,
+		Additions:        n.Additions,
+		Deletions:        n.Deletions,
+		CommitsTruncated: n.Commits.TotalCount > maxCommits,
+	}
+	for _, cn := range n.Commits.Nodes {
+		c := rawCommit{
+			Additions: cn.Commit.Additions,
+			Deletions: cn.Commit.Deletions,
+			Merge:     cn.Commit.Parents.TotalCount > 1,
+		}
+		for _, a := range cn.Commit.Authors.Nodes {
+			if a.User != nil {
+				c.Logins = append(c.Logins, a.User.Login)
+			}
+		}
+		pr.Commits = append(pr.Commits, c)
+	}
+	return pr
+}
+
+// mostRecentlyMerged returns the numbers of the n most recently merged PRs,
+// newest first.
+func mostRecentlyMerged(candidates []rawPR, n int) []int {
+	sorted := slices.Clone(candidates)
+	slices.SortStableFunc(sorted, func(a, b rawPR) int { return b.MergedAt.Compare(a.MergedAt) })
+	var numbers []int
+	for _, pr := range sorted[:min(n, len(sorted))] {
+		numbers = append(numbers, pr.Number)
+	}
+	return numbers
+}
+
+func (g *gitHub) MergedPRs(repo, query string, n int) (int, []rawPR, error) {
+	var cand struct {
+		Search struct {
+			IssueCount int
+			Nodes      []struct {
+				Number   int
+				MergedAt time.Time
+			}
+		}
+	}
+	vars := map[string]any{"q": query + " sort:updated-desc", "n": mergedCandidates}
+	if err := g.gqlDo(mergedCandidatesQuery, vars, &cand); err != nil {
 		return 0, nil, fmt.Errorf("merged PRs for %q: %w", query, err)
 	}
-
-	prs := make([]rawPR, 0, len(resp.Search.Nodes))
-	for _, node := range resp.Search.Nodes {
-		pr := rawPR{
-			Number:           node.Number,
-			MergedAt:         node.MergedAt,
-			Additions:        node.Additions,
-			Deletions:        node.Deletions,
-			CommitsTruncated: node.Commits.TotalCount > maxCommits,
-		}
-		for _, cn := range node.Commits.Nodes {
-			c := rawCommit{
-				Additions: cn.Commit.Additions,
-				Deletions: cn.Commit.Deletions,
-				Merge:     cn.Commit.Parents.TotalCount > 1,
-			}
-			for _, a := range cn.Commit.Authors.Nodes {
-				if a.User != nil {
-					c.Logins = append(c.Logins, a.User.Login)
-				}
-			}
-			pr.Commits = append(pr.Commits, c)
-		}
-		prs = append(prs, pr)
+	var candidates []rawPR
+	for _, c := range cand.Search.Nodes {
+		candidates = append(candidates, rawPR{Number: c.Number, MergedAt: c.MergedAt})
 	}
-	return resp.Search.IssueCount, prs, nil
+	numbers := mostRecentlyMerged(candidates, n)
+	if len(numbers) == 0 {
+		return cand.Search.IssueCount, nil, nil
+	}
+
+	owner, name, _ := strings.Cut(repo, "/")
+	var q strings.Builder
+	q.WriteString("query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n")
+	for i, num := range numbers {
+		fmt.Fprintf(&q, "    pr%d: pullRequest(number: %d) {%s}\n", i, num, prFields)
+	}
+	q.WriteString("  }\n}")
+
+	var resp struct {
+		Repository map[string]*prNode
+	}
+	if err := g.gqlDo(q.String(), map[string]any{"owner": owner, "name": name}, &resp); err != nil {
+		return 0, nil, fmt.Errorf("commits for merged PRs in %s: %w", repo, err)
+	}
+	prs := make([]rawPR, 0, len(numbers))
+	for i := range numbers {
+		if node := resp.Repository[fmt.Sprintf("pr%d", i)]; node != nil {
+			prs = append(prs, node.raw())
+		}
+	}
+	return cand.Search.IssueCount, prs, nil
 }
 
 const ownedReposQuery = `

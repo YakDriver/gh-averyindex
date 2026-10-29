@@ -428,7 +428,7 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 		return m, err
 	}
 
-	total, raw, err := src.MergedPRs(prs+" is:merged sort:created-desc", recentMergedSample)
+	total, raw, err := src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
 	if err != nil {
 		return m, err
 	}

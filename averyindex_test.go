@@ -59,8 +59,8 @@ func (f *fakeSource) Search(q, order string, n int) (int, []searchItem, error) {
 	return r.total, r.items[:min(n, len(r.items))], nil
 }
 
-func (f *fakeSource) MergedPRs(q string, n int) (int, []rawPR, error) {
-	f.mergedQuery = q
+func (f *fakeSource) MergedPRs(repo, q string, n int) (int, []rawPR, error) {
+	f.mergedQuery = repo + " " + q
 	return f.merged, f.prs[:min(n, len(f.prs))], nil
 }
 
@@ -135,7 +135,7 @@ func TestCollect(t *testing.T) {
 	if !slices.Equal(m.OpenPRs, []searchItem{open}) {
 		t.Errorf("OpenPRs = %+v", m.OpenPRs)
 	}
-	if want := r + " is:pr author:u is:merged sort:created-desc"; src.mergedQuery != want {
+	if want := "o/r " + r + " is:pr author:u is:merged"; src.mergedQuery != want {
 		t.Errorf("merged query = %q, want %q", src.mergedQuery, want)
 	}
 	if len(m.RecentMerged) != 2 || m.RecentMerged[0].Credit != 1 || m.RecentMerged[1].Credit != 0.5 {
@@ -296,6 +296,43 @@ func TestOthersReactions(t *testing.T) {
 	for _, tt := range tests {
 		if got := othersReactions(tt.total, tt.logins, "u"); got != tt.want {
 			t.Errorf("othersReactions(%d, %v) = %d, want %d", tt.total, tt.logins, got, tt.want)
+		}
+	}
+}
+
+func TestMostRecentlyMerged(t *testing.T) {
+	// Candidates arrive in update order. #3 is old but got a comment today,
+	// and #9 was opened long ago but merged yesterday (#6).
+	candidates := []rawPR{
+		{Number: 3, MergedAt: day("2024-01-01")},
+		{Number: 7, MergedAt: day("2026-10-20")},
+		{Number: 9, MergedAt: day("2026-10-28")},
+		{Number: 8, MergedAt: day("2026-10-25")},
+	}
+	if got := mostRecentlyMerged(candidates, 2); !slices.Equal(got, []int{9, 8}) {
+		t.Errorf("mostRecentlyMerged() = %v, want [9 8]", got)
+	}
+	if got := mostRecentlyMerged(candidates, 10); !slices.Equal(got, []int{9, 8, 7, 3}) {
+		t.Errorf("mostRecentlyMerged(10) = %v, want all four newest first", got)
+	}
+	if got := mostRecentlyMerged(nil, 5); got != nil {
+		t.Errorf("mostRecentlyMerged(nil) = %v", got)
+	}
+}
+
+func TestNotAPerson(t *testing.T) {
+	for _, tt := range []struct {
+		typ  string
+		want string
+	}{
+		{"User", ""},
+		{"", ""},
+		{"Bot", "dependabot[bot] is a bot account."},
+		{"Organization", "dependabot[bot] is an organization."},
+	} {
+		got := notAPerson(account{Login: "dependabot[bot]", Type: tt.typ})
+		if tt.want == "" && got != "" || !strings.HasPrefix(got, tt.want) {
+			t.Errorf("notAPerson(%q) = %q, want prefix %q", tt.typ, got, tt.want)
 		}
 	}
 }
