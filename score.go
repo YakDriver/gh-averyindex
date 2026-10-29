@@ -46,8 +46,8 @@ type Weights struct {
 	ElsewhereCap    float64
 
 	// Pattern. NotLanding is multiplied by log2(1 + PRs opened in the last
-	// 30 days) and by (1 - merge rate)², so it only bites when volume is
-	// high and the merge rate is low.
+	// 30 days) and by (1 - landing rate)², so it only bites when volume is
+	// high and PRs aren't landing. See Global.LandingRate.
 	NotLanding float64
 }
 
@@ -150,10 +150,13 @@ func score(m Metrics, w Weights) Result {
 		})
 	}
 
-	miss := 1 - g.SmoothedMergeRate()
+	miss := 1 - g.LandingRate()
 	notLanding := Component{
-		Label:  "Recent PRs not landing",
-		Detail: fmt.Sprintf("%s in %d days, %.0f%% merge rate", thousands(g.RecentPRs), recentDays, g.SmoothedMergeRate()*100),
+		Label: "Recent PRs not landing",
+		Detail: fmt.Sprintf("%s in %d days · %s of %s merged · history %s of %s",
+			thousands(g.RecentPRs), recentDays,
+			thousands(g.RecentMerged), thousands(g.RecentMerged+g.RecentClosedUnmerged),
+			thousands(g.HistoryMerged()), thousands(g.HistoryResolved())),
 		Count:  float64(g.RecentPRs),
 		Points: points(float64(g.RecentPRs), w.NotLanding) * miss * miss,
 	}

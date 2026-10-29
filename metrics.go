@@ -49,8 +49,12 @@ type Global struct {
 	Contributors       int  `json:"contributors"`
 	ContributorsSample bool `json:"contributors_sampled,omitempty"`
 
-	// RecentPRs is PRs opened anywhere in the last recentDays days.
-	RecentPRs int `json:"recent_prs"`
+	// RecentPRs is PRs opened anywhere in the last recentDays days, and
+	// RecentMerged and RecentClosedUnmerged are how those PRs resolved so far.
+	// PRs still open count as neither, however long they've waited.
+	RecentPRs            int `json:"recent_prs"`
+	RecentMerged         int `json:"recent_merged"`
+	RecentClosedUnmerged int `json:"recent_closed_unmerged"`
 	// RecentRepos and RecentTopRepo come from the newest RecentSampled of
 	// those PRs.
 	RecentRepos    int    `json:"recent_repos"`
@@ -74,11 +78,30 @@ func (g Global) MergeRate() (float64, bool) {
 	return float64(g.PRsMerged) / float64(resolved), true
 }
 
-// SmoothedMergeRate is MergeRate with one merged and one unmerged PR added,
-// so someone with no history starts at 50% instead of 0% or 100%.
-func (g Global) SmoothedMergeRate() float64 {
-	resolved := g.PRsMerged + g.ClosedUnmerged()
-	return float64(g.PRsMerged+1) / float64(resolved+2)
+// priorWeight caps how many PRs' worth of evidence the user's history before
+// the recent window counts for. A long record cushions a bad month but
+// can't outweigh dozens of recent PRs that didn't land.
+const priorWeight = 20
+
+// HistoryMerged and HistoryResolved are merged and resolved PRs opened
+// before the recent window.
+func (g Global) HistoryMerged() int {
+	return max(0, g.PRsMerged-g.RecentMerged)
+}
+
+func (g Global) HistoryResolved() int {
+	return g.HistoryMerged() + max(0, g.ClosedUnmerged()-g.RecentClosedUnmerged)
+}
+
+// LandingRate estimates how likely the user's PRs are to be merged. History
+// before the recent window sets the expectation, weighted as at most
+// priorWeight PRs, and recent resolved PRs update it. With no history the
+// expectation is 50%, so a first PR barely registers.
+func (g Global) LandingRate() float64 {
+	prior := float64(g.HistoryMerged()+1) / float64(g.HistoryResolved()+2)
+	strength := float64(min(g.HistoryResolved(), priorWeight) + 2)
+	recentResolved := g.RecentMerged + g.RecentClosedUnmerged
+	return (float64(g.RecentMerged) + prior*strength) / (float64(recentResolved) + strength)
 }
 
 // MergedPR is a recent merged PR with its rework.
@@ -261,9 +284,23 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 	}
 
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
-	total, items, err := src.Search(prs+" created:>="+since, "desc", recentSample)
+	recent := prs + " created:>=" + since
+	total, items, err := src.Search(recent, "desc", recentSample)
 	if err != nil {
 		return err
+	}
+	for _, c := range []struct {
+		dst   *int
+		query string
+	}{
+		{&g.RecentMerged, recent + " is:merged"},
+		{&g.RecentClosedUnmerged, recent + " is:closed is:unmerged"},
+	} {
+		n, _, err := src.Search(c.query, "", 1)
+		if err != nil {
+			return err
+		}
+		*c.dst = n
 	}
 	g.RecentPRs = total
 	g.RecentSampled = len(items)
