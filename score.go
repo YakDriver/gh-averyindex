@@ -127,8 +127,8 @@ func score(m Metrics, w Weights) Result {
 
 	elsewhere := []Component{
 		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge)},
-		{Label: "PRs merged elsewhere", Count: float64(m.MergedElsewhere()),
-			Points: points(float64(m.MergedElsewhere()), w.MergedElsewhere)},
+		{Label: "PRs merged elsewhere", Count: float64(g.MergedElsewhere),
+			Points: points(float64(g.MergedElsewhere), w.MergedElsewhere)},
 	}
 	var elsewhereTotal float64
 	for _, c := range elsewhere {

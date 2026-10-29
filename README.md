@@ -65,7 +65,12 @@ A 1,000-line PR where a maintainer deleted 900 lines and added 100 has rework 10
 
 ## Elsewhere on GitHub
 
-The report also shows the user's PR activity across all of GitHub: account age, PRs opened and merged anywhere, merge rate, and PRs opened in the last 30 days with how many repos they went to. That's what separates a real newcomer from an account spraying PRs across dozens of repos.
+The report also shows the user's PR activity across GitHub: account age, PRs opened and merged, merge rate, and PRs opened in the last 30 days with how many repos they went to. That's what separates a real newcomer from an account spraying PRs across dozens of repos.
+
+These numbers only cover public repositories the user doesn't own:
+
+- **Own repos are excluded** because anyone can open and merge PRs in their own repo. Counting them would let an account inflate its merge rate and its "merged elsewhere" bonus for free.
+- **Private repos are excluded** so everyone running the tool gets the same answer, and private repo names never appear in the report.
 
 ## Score
 
@@ -89,7 +94,7 @@ Signals that depend on someone else's judgment (a maintainer merged it without r
 | Component | Weight |
 |---|---|
 | Account age, in months | 3 |
-| PRs merged in other repositories | 4 |
+| PRs merged in other public repositories the user doesn't own | 4 |
 
 **Pattern** penalizes opening many PRs that don't land. It's uncapped:
 

@@ -65,6 +65,7 @@ func day(s string) time.Time {
 
 func TestCollect(t *testing.T) {
 	const r = "repo:o/r"
+	const g = "is:pr author:u is:public -user:u"
 	first := searchItem{Number: 1, CreatedAt: day("2020-01-01")}
 	last := searchItem{Number: 9, CreatedAt: day("2026-10-01"), IsPR: true}
 	open := searchItem{Number: 9, CreatedAt: day("2026-10-01"), IsPR: true}
@@ -77,10 +78,11 @@ func TestCollect(t *testing.T) {
 			"asc|" + r + " author:u":                   {total: 14, items: []searchItem{first}},
 			"desc|" + r + " author:u":                  {total: 14, items: []searchItem{last}},
 			"desc|" + r + " is:pr author:u is:open":    {total: 1, items: []searchItem{open}},
-			"|is:pr author:u":                          {total: 110},
-			"|is:pr author:u is:merged":                {total: 40},
-			"|is:pr author:u is:open":                  {total: 30},
-			"desc|is:pr author:u created:>=2026-09-29": {total: 4, items: []searchItem{
+			"|" + g:                                    {total: 110},
+			"|" + g + " is:merged":                     {total: 40},
+			"|" + g + " is:open":                       {total: 30},
+			"|" + g + " is:merged -repo:o/r":           {total: 34},
+			"desc|" + g + " created:>=2026-09-29": {total: 4, items: []searchItem{
 				{Repo: "a/x"}, {Repo: "b/y"}, {Repo: "b/y"}, {Repo: "c/z"},
 			}},
 		},
@@ -122,17 +124,39 @@ func TestCollect(t *testing.T) {
 	if got := m.CodeCredit(); got != 4.5 {
 		t.Errorf("CodeCredit() = %v, want 4.5 (6 merged × 0.75)", got)
 	}
-	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30,
+	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30, MergedElsewhere: 34,
 		RecentPRs: 4, RecentRepos: 3, RecentTopRepo: "b/y", RecentTopCount: 2, RecentSampled: 4}
 	if m.Global != wantGlobal {
 		t.Errorf("Global =\n%+v\nwant\n%+v", m.Global, wantGlobal)
 	}
-	if got := m.MergedElsewhere(); got != 34 {
-		t.Errorf("MergedElsewhere() = %d, want 34", got)
-	}
 	for key := range src.search {
 		if !slices.Contains(src.queries, key) {
 			t.Errorf("query not issued: %q", key)
+		}
+	}
+}
+
+func TestCollectGlobalScope(t *testing.T) {
+	src := &fakeSource{}
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	var global []string
+	for _, q := range src.queries {
+		if !strings.Contains(q, "repo:o/r is:") && !strings.Contains(q, "repo:o/r author:") &&
+			!strings.Contains(q, "repo:o/r commenter:") && strings.Contains(q, "is:pr author:u") {
+			global = append(global, q)
+		}
+	}
+	if len(global) != 5 {
+		t.Fatalf("got %d global queries, want 5: %q", len(global), global)
+	}
+	for _, q := range global {
+		// Own repos are excluded because anyone can merge their own PRs (#1).
+		// Private repos are excluded so results don't depend on who runs the
+		// tool and private repo names don't leak (#4).
+		if !strings.Contains(q, " -user:u") || !strings.Contains(q, " is:public") {
+			t.Errorf("global query missing scope: %q", q)
 		}
 	}
 }
@@ -150,7 +174,7 @@ func TestCollectAccountAge(t *testing.T) {
 
 func TestRecentTopRepoTieBreak(t *testing.T) {
 	src := &fakeSource{search: map[string]fakeSearch{
-		"desc|is:pr author:u created:>=2026-09-29": {total: 2, items: []searchItem{{Repo: "z/z"}, {Repo: "a/a"}}},
+		"desc|is:pr author:u is:public -user:u created:>=2026-09-29": {total: 2, items: []searchItem{{Repo: "z/z"}, {Repo: "a/a"}}},
 	}}
 	m, _ := collect(src, "o/r", account{Login: "u"}, testNow)
 	if m.Global.RecentTopRepo != "a/a" {
@@ -328,7 +352,7 @@ func elsewherePoints(r Result) float64 {
 }
 
 func TestScoreElsewhereCapped(t *testing.T) {
-	famous := Metrics{Global: Global{AccountAgeDays: 5000, PRsOpened: 6000, PRsMerged: 5000}}
+	famous := Metrics{Global: Global{AccountAgeDays: 5000, PRsOpened: 6000, PRsMerged: 5000, MergedElsewhere: 5000}}
 	r := score(famous, defaultWeights)
 	if got := elsewherePoints(r); math.Abs(got-defaultWeights.ElsewhereCap) > 1e-9 {
 		t.Errorf("elsewhere = %v, want cap %v", got, defaultWeights.ElsewhereCap)
@@ -376,7 +400,7 @@ func TestScoreSprayAccountScoresBadly(t *testing.T) {
 	// The pattern from a 17-day-old account that opened 106 PRs across 22 repos.
 	spray := Metrics{PRsOpened: 2, Global: Global{AccountAgeDays: 17, PRsOpened: 106, PRsMerged: 2, PRsOpen: 85, RecentPRs: 106}}
 	// A real newcomer: established account, one closed PR here.
-	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, RecentPRs: 2}}
+	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, MergedElsewhere: 25, RecentPRs: 2}}
 
 	s, n := score(spray, defaultWeights).Score, score(newcomer, defaultWeights).Score
 	if s > -20 {
@@ -560,7 +584,7 @@ func TestRenderText(t *testing.T) {
 		},
 		OpenPRs: []searchItem{{Number: 71, CreatedAt: day("2026-10-20"), IsPR: true}},
 		Global: Global{AccountCreated: day("2024-10-29"), AccountAgeDays: 730,
-			PRsOpened: 1300, PRsMerged: 1250, PRsOpen: 12,
+			PRsOpened: 1300, PRsMerged: 1250, PRsOpen: 12, MergedElsewhere: 50,
 			RecentPRs: 150, RecentRepos: 2, RecentTopRepo: "o/r", RecentTopCount: 70, RecentSampled: 100},
 	}
 	var buf bytes.Buffer

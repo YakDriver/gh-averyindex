@@ -18,7 +18,10 @@ const (
 	recentSample = 100
 )
 
-// Global is the user's PR activity across all of GitHub, not just this repo.
+// Global is the user's PR activity across GitHub. It covers public
+// repositories the user doesn't own: anyone can open and merge PRs in their
+// own repos, and private repos would make the result depend on who runs the
+// tool.
 type Global struct {
 	AccountCreated time.Time `json:"account_created,omitzero"`
 	AccountAgeDays int       `json:"account_age_days"`
@@ -26,6 +29,10 @@ type Global struct {
 	PRsOpened int `json:"prs_opened"`
 	PRsMerged int `json:"prs_merged"`
 	PRsOpen   int `json:"prs_open"`
+
+	// MergedElsewhere is PRs merged in those repositories, excluding the one
+	// being scored.
+	MergedElsewhere int `json:"merged_elsewhere"`
 
 	// RecentPRs is PRs opened anywhere in the last recentDays days.
 	RecentPRs int `json:"recent_prs"`
@@ -108,11 +115,6 @@ type Metrics struct {
 	OpenPRs      []searchItem `json:"open_prs,omitempty"`
 
 	Global Global `json:"global"`
-}
-
-// MergedElsewhere is PRs merged in repositories other than this one.
-func (m Metrics) MergedElsewhere() int {
-	return max(0, m.Global.PRsMerged-m.PRsMerged)
 }
 
 // PRsClosedUnmerged is PRs the user opened that were closed without merging.
@@ -211,13 +213,18 @@ func ownedBy(owners []string, c rawCommit) bool {
 	return false
 }
 
-func collectGlobal(src source, acct account, now time.Time, g *Global) error {
+// globalScope limits a search to public repositories the user doesn't own.
+func globalScope(login string) string {
+	return "is:public -user:" + login
+}
+
+func collectGlobal(src source, repo string, acct account, now time.Time, g *Global) error {
 	if !acct.CreatedAt.IsZero() {
 		g.AccountCreated = acct.CreatedAt
 		g.AccountAgeDays = int(now.Sub(acct.CreatedAt).Hours() / 24)
 	}
 
-	prs := "is:pr author:" + acct.Login
+	prs := fmt.Sprintf("is:pr author:%s %s", acct.Login, globalScope(acct.Login))
 	for _, c := range []struct {
 		dst   *int
 		query string
@@ -225,6 +232,7 @@ func collectGlobal(src source, acct account, now time.Time, g *Global) error {
 		{&g.PRsOpened, prs},
 		{&g.PRsMerged, prs + " is:merged"},
 		{&g.PRsOpen, prs + " is:open"},
+		{&g.MergedElsewhere, prs + " is:merged -repo:" + repo},
 	} {
 		n, _, err := src.Search(c.query, "", 1)
 		if err != nil {
@@ -258,7 +266,7 @@ func collectGlobal(src source, acct account, now time.Time, g *Global) error {
 func collect(src source, repo string, acct account, now time.Time) (Metrics, error) {
 	user := acct.Login
 	m := Metrics{User: user, Repo: repo}
-	if err := collectGlobal(src, acct, now, &m.Global); err != nil {
+	if err := collectGlobal(src, repo, acct, now, &m.Global); err != nil {
 		return m, err
 	}
 
