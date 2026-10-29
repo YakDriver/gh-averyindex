@@ -64,10 +64,11 @@ type source interface {
 	// OwnedRepoStars returns the star counts of the user's public, non-fork
 	// repositories, at most the 100 most starred.
 	OwnedRepoStars(login string) ([]int, error)
-	// ThumbsUp sums 👍 reactions on the issues and PRs matching query.
+	// ThumbsUp sums 👍 reactions on the issues and PRs matching query, not
+	// counting reactions by author.
 	// GitHub search returns at most 1,000 results, so truncated reports
 	// whether the sum is incomplete.
-	ThumbsUp(query string) (total int, truncated bool, err error)
+	ThumbsUp(query, author string) (total int, truncated bool, err error)
 }
 
 type gitHub struct {
@@ -372,22 +373,43 @@ func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
 	return stars, nil
 }
 
+// reactionSample is how many 👍 reactions per item are checked for the
+// author's own. An author who upvotes their own issue usually does it first,
+// so checking the oldest is enough.
+const reactionSample = 100
+
 const thumbsUpQuery = `
 query($q: String!, $cursor: String) {
   search(query: $q, type: ISSUE, first: 100, after: $cursor) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
-      ... on Issue { reactions(content: THUMBS_UP) { totalCount } }
-      ... on PullRequest { reactions(content: THUMBS_UP) { totalCount } }
+      ... on Issue { reactions(content: THUMBS_UP, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
+      ... on PullRequest { reactions(content: THUMBS_UP, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
     }
   }
+}
+
+fragment thumbs on ReactionConnection {
+  totalCount
+  nodes { user { login } }
 }`
+
+// othersReactions is total reactions minus any by author among the sampled
+// logins.
+func othersReactions(total int, logins []string, author string) int {
+	for _, l := range logins {
+		if strings.EqualFold(l, author) {
+			total--
+		}
+	}
+	return max(0, total)
+}
 
 // searchResultLimit is the most results GitHub search will return for a query.
 const searchResultLimit = 1000
 
-func (g *gitHub) ThumbsUp(query string) (int, bool, error) {
+func (g *gitHub) ThumbsUp(query, author string) (int, bool, error) {
 	var total int
 	var cursor *string
 	for {
@@ -401,6 +423,9 @@ func (g *gitHub) ThumbsUp(query string) (int, bool, error) {
 				Nodes []struct {
 					Reactions struct {
 						TotalCount int
+						Nodes      []struct {
+							User *struct{ Login string }
+						}
 					}
 				}
 			}
@@ -410,7 +435,13 @@ func (g *gitHub) ThumbsUp(query string) (int, bool, error) {
 			return 0, false, fmt.Errorf("reactions for %q: %w", query, err)
 		}
 		for _, n := range resp.Search.Nodes {
-			total += n.Reactions.TotalCount
+			var logins []string
+			for _, r := range n.Reactions.Nodes {
+				if r.User != nil {
+					logins = append(logins, r.User.Login)
+				}
+			}
+			total += othersReactions(n.Reactions.TotalCount, logins, author)
 		}
 		if !resp.Search.PageInfo.HasNextPage {
 			return total, resp.Search.IssueCount > searchResultLimit, nil

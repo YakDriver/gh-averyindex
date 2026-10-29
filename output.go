@@ -88,12 +88,12 @@ func renderGlobal(w io.Writer, g Global) {
 	if r, ok := g.MergeRate(); ok {
 		rate = fmt.Sprintf("%.0f%% of %s resolved", r*100, thousands(g.PRsMerged+g.ClosedUnmerged()))
 	}
-	recent := fmt.Sprintf("%s PRs", thousands(g.RecentPRs))
+	recent := plural(g.RecentPRs, "PR")
 	if g.RecentPRs > 0 {
 		recent += fmt.Sprintf(" · %s merged · %s closed unmerged · %s open",
 			thousands(g.RecentMerged), thousands(g.RecentClosedUnmerged),
 			thousands(max(0, g.RecentPRs-g.RecentMerged-g.RecentClosedUnmerged)))
-		recent += fmt.Sprintf("\n\t  across %d repos (most: %d in %s)", g.RecentRepos, g.RecentTopCount, g.RecentTopRepo)
+		recent += fmt.Sprintf("\n\t  across %s (most: %d in %s)", plural(g.RecentRepos, "repo"), g.RecentTopCount, g.RecentTopRepo)
 		if g.RecentPRs > g.RecentSampled {
 			recent += fmt.Sprintf(", repos from the newest %d", g.RecentSampled)
 		}
@@ -120,6 +120,14 @@ func projects(g Global) string {
 	}
 	return fmt.Sprintf("%s stars on %d repos with %d+ · %s",
 		thousands(g.ProjectStars), g.ProjectsStarred, minProjectStars, contributors)
+}
+
+// plural formats n with a noun, adding "s" unless n is 1.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return thousands(n) + " " + noun + "s"
 }
 
 // count formats whole numbers with separators and fractions to one place.
