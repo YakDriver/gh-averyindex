@@ -13,7 +13,10 @@ var version = ""
 
 // schemaVersion is the --json format version. Increase it when fields are
 // removed or change meaning.
-const schemaVersion = 1
+//
+//	2: threads excludes PRs the user reviewed; thumbs_up excludes the user's
+//	   own reactions.
+const schemaVersion = 2
 
 // buildInfo is the version and, when known, the commit and its date.
 type buildInfo struct {
