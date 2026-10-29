@@ -22,7 +22,7 @@ fmt: ## Apply gofmt
 
 fmt-check: ## [CI] Format Check / gofmt
 	@echo "make: Checking gofmt..."
-	@files=$$(gofmt -l .); \
+	@files=$$(gofmt -l .) || exit $$?; \
 	if [ -n "$$files" ]; then \
 		echo "make: Files need gofmt:"; echo "$$files"; \
 		echo "make: To fix, run: make fmt"; exit 1; \
