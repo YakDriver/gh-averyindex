@@ -27,18 +27,21 @@ func main() {
 }
 
 type options struct {
-	repo string
-	json bool
-	user string
+	repo    string
+	json    bool
+	version bool
+	user    string
 }
 
 const usage = `Usage: gh averyindex [-R owner/repo] [--json] <user>
+       gh averyindex --version
 
 Summarize how helpful a GitHub user has been in a repository.
 
 Flags:
   -R, --repo owner/repo   Repository to score against (default: current repo)
       --json              Print JSON instead of a table
+      --version           Print the version and exit
 `
 
 // parseArgs parses flags and the single positional user argument. Flags may
@@ -52,6 +55,7 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.repo, "R", "", "")
 	fs.StringVar(&opts.repo, "repo", "", "")
 	fs.BoolVar(&opts.json, "json", false, "")
+	fs.BoolVar(&opts.version, "version", false, "")
 
 	var positional []string
 	for {
@@ -65,6 +69,9 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 		args = fs.Args()[1:]
 	}
 
+	if opts.version && len(positional) == 0 {
+		return opts, nil
+	}
 	if len(positional) != 1 {
 		fs.Usage()
 		return opts, errors.New("expected exactly one user")
@@ -84,6 +91,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
+	}
+	if opts.version {
+		fmt.Fprintln(stdout, currentBuild())
+		return 0
 	}
 
 	repo, err := resolveRepo(opts.repo)
@@ -105,17 +116,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fullName := repo.Owner + "/" + repo.Name
-	m, err := collect(gh, fullName, acct, time.Now())
+	now := time.Now()
+	m, err := collect(gh, fullName, acct, now)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
 	result := score(m, defaultWeights)
+	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC()}
 	if opts.json {
-		err = renderJSON(stdout, m, result)
+		err = renderJSON(stdout, m, result, md)
 	} else {
-		err = renderText(stdout, m, result)
+		err = renderText(stdout, m, result, md)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)

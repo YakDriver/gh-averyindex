@@ -91,11 +91,11 @@ func tierFor(score int) string {
 
 // Component is one line of the score breakdown.
 type Component struct {
-	Group  string  `json:"group"`
-	Label  string  `json:"label"`
-	Detail string  `json:"detail,omitempty"`
-	Count  float64 `json:"count"`
-	Points float64 `json:"points"`
+	Group  string `json:"group"`
+	Label  string `json:"label"`
+	Detail string `json:"detail,omitempty"`
+	Count  float64
+	Points float64
 }
 
 // Result is the score and the components that produced it.

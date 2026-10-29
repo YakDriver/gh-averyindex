@@ -4,15 +4,14 @@ A [gh](https://cli.github.com/) extension that shows how helpful a user has been
 
 ```console
 $ gh averyindex johnthedev97
-johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  averyindex 49
+johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  averyindex 68
 
 Participation
   Issues opened      0
   Threads commented  6
   PRs reviewed       0
   Upvotes received   49
-  First authored     PR #1183, 2017-07-19
-  Last authored      PR #50684, 2026-10-27
+  ...
 
 Pull requests  3 merged · 1 open · 1 closed unmerged
   #19195  merged 2022-03-15  +153 -103  rework 288%  credit 0.00
@@ -20,11 +19,30 @@ Pull requests  3 merged · 1 open · 1 closed unmerged
   #9261   merged 2019-07-10  +349 -0    rework   0%  credit 1.00  (commits by crjohn)
   #50684  open since 2026-10-27
 
-Score
+Elsewhere on GitHub (public repos the user doesn't own)
   ...
+
+Score
+  Here
+    Code credit (3 merged × 0.63)                 1.9    +18.3
+    Upvotes received                               49    +28.2
+    ...
+  averyindex                                  Regular       68
+
+averyindex v0.3.0 · 2026-10-29 17:54 UTC
 ```
 
 The score is for a quick read, not a verdict. Look at the breakdown.
+
+## Why trust it
+
+AI tools made it cheap to produce plausible pull requests, comments, and issues. They didn't make it cheap to get a maintainer to merge your code unchanged, or to get other people to upvote your bug report or contribute to your project. averyindex weighs those signals most.
+
+- **It counts other people's judgments.** Merged PRs, rework, upvotes, and contributors to a user's projects all depend on someone else. Things a person produces alone (comments, issues) count for less, and PRs they merge into their own repositories don't count.
+- **It shows its work.** Every point in the score is on a line in the report, with the count behind it. If you disagree with the number, you can see exactly why it came out that way.
+- **Anyone gets the same answer.** Activity outside the scored repo comes only from public repositories, and each version scores the same way for everyone. Every report records the version and time it was generated, so an old score can be checked.
+- **It reports. It doesn't decide.** The score is a quick read for a maintainer, not a gate. There's no threshold that admits or rejects anyone. [Flags](#flags) point out patterns worth a closer look and don't change the score.
+- **It says what it can't see.** See [Limits](#limits).
 
 ## Install
 
@@ -36,32 +54,24 @@ gh extension install YakDriver/gh-averyindex
 
 ```sh
 gh averyindex [-R owner/repo] [--json] <user>
+gh averyindex --version
 ```
 
 Run it inside a clone to score against that repository, or pass `-R`. It uses your existing `gh` login, so it works on any repository you can read.
 
-## The report
+`--json` output includes `schema_version`, `version`, and `generated_at` alongside the metrics, score, and flags. `schema_version` changes when a field is removed or changes meaning.
 
-**Participation** is everything besides the user's own PRs: issues opened, other people's threads they commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs they reviewed, and 👍 reactions on their issues and PRs.
+## What goes into it
 
-"First authored" is the user's oldest issue or PR. Comments aren't included because GitHub can't cheaply say when someone first commented.
+**Participation** in this repo: issues opened, other people's threads commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs reviewed, and 👍 reactions on the user's issues and PRs.
 
-**Pull requests** lists the 5 most recent merged PRs with their rework, and up to 5 open PRs.
+**Pull requests** in this repo, with **rework** for recent merged ones: how much of each PR someone else changed before it merged. A PR a maintainer mostly rewrote earns little credit. A CHANGELOG touch-up barely matters.
 
-## Rework
+**Elsewhere on GitHub**: account age, PRs merged in other people's public repos, and what other people do with the user's own projects (stars and outside contributors). PRs a user merges into their own repos don't count, since nobody else judged them. This gives an established developer some benefit of the doubt in a repo they're new to, and it's capped so it can't stand in for work here.
 
-Rework is how much of a merged PR someone else changed:
+**Pattern**: a penalty for opening many PRs that don't land. It weighs the last 30 days against the user's longer history, so a long record cushions a bad month without hiding a burst of rejected PRs. PRs still waiting for review don't count against anyone.
 
-```
-rework = lines other people added or deleted / lines the author added
-credit = 1 - min(1, rework)
-```
-
-A 1,000-line PR where a maintainer deleted 900 lines and added 100 has rework 100% and credit 0. A CHANGELOG touch-up barely moves it. This works for squash merges too, because GitHub keeps the PR's commit list.
-
-- Merge commits (such as merging `main` into the branch) are skipped.
-- Commits with no linked GitHub account count as the author's.
-- If none of the commits are linked to the PR author, the first commit's authors are treated as the contributor (usually the same person on a second account). The report shows "(commits by ...)" when that happens.
+Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. The score maps to a tier: Novice, Contributor, Regular, Veteran, or Core. Exact weights are in the code.
 
 ## Flags
 
@@ -69,8 +79,8 @@ Flags appear under the header line when something deserves a closer look. They s
 
 | Flag | When |
 |---|---|
-| Recent PRs mostly not landing | The Pattern penalty is −10 or worse and outweighs everything else in the score, and fewer than half of at least 5 recently resolved PRs merged |
-| New account | Under 90 days old, with 20+ PRs across 10+ repos in the last 30 days, even if none have been closed yet |
+| Recent PRs mostly not landing | The Pattern penalty outweighs everything else, and fewer than half of the user's recently resolved PRs merged |
+| New account | A new account opened many PRs across many repos in the last 30 days, even if none have been closed yet |
 | Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
 
 ```console
@@ -82,77 +92,22 @@ hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  averyindex -26
 
 A new account can be legitimate, for example someone doing Hacktoberfest. The flag includes how many PRs merged so a maintainer can judge. `--json` lists flags in a `flags` array with a stable `code` for each.
 
-## Elsewhere on GitHub
+## Limits
 
-The report also shows the user's PR activity across GitHub: account age, PRs opened and merged, merge rate, and PRs opened in the last 30 days with how many repos they went to. That's what separates a real newcomer from an account spraying PRs across dozens of repos.
+- **Only GitHub.** Work on other forges, mailing lists, or inside companies isn't visible.
+- **Private repositories are excluded** from everything outside the scored repo.
+- **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control.
+- **Search returns at most 1,000 results.** Upvotes received and the repo count for recent PRs can be partial. The report says so when they are.
+- **Rework is sampled** from 5 merged PRs, and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
+- **"First authored" ignores comments.** It's the user's oldest issue or PR in the repo.
+- **Contributors to own projects** count distinct non-bot accounts, so a user's own automation account registered as a regular user counts once.
+- **Results change over time** as PRs merge and close. Check the timestamp at the end of the report.
 
-These numbers only cover public repositories the user doesn't own:
-
-- **Own repos are excluded** because anyone can open and merge PRs in their own repo. Counting them would let an account inflate its merge rate and its "merged elsewhere" bonus for free.
-- **Own projects still count, through what other people do with them.** Stars on the user's public, non-fork repos (repos with at least 3 stars) and the number of distinct people whose PRs the user merged into them both add to the score. A maintainer gets credit for projects people use and contribute to. A throwaway account merging its own PRs gets nothing.
-- **Private repos are excluded** so everyone running the tool gets the same answer, and private repo names never appear in the report.
-
-## Score
-
-The score has three groups. Each count contributes `weight × log2(1 + count)`, so early contributions matter most and very large counts don't drown out everything else.
-
-**Here** is work in this repository, and it's most of the score.
-
-| Component | Weight |
-|---|---|
-| Code credit: merged PRs × average credit of the recent ones | 12 |
-| Upvotes received | 5 |
-| PRs reviewed | 5 |
-| Threads commented | 2 |
-| Issues opened | 2 |
-| PRs closed unmerged | -3 |
-
-Signals that depend on someone else's judgment (a maintainer merged it without rewriting it, other users upvoted it) weigh more than signals a user produces alone, because they're harder to inflate.
-
-**Elsewhere** gives an established developer some benefit of the doubt in a repo they're new to. It's capped at +20 so it can't substitute for work here.
-
-| Component | Weight |
-|---|---|
-| Account age, in months | 1.5 |
-| PRs merged in other public repositories the user doesn't own | 4 |
-| Stars on the user's own public repos (repos with 3+ stars) | 2 |
-| Distinct people whose PRs the user merged into their own repos (bots excluded) | 4 |
-
-**Pattern** penalizes opening many PRs that don't land. It's uncapped:
-
-```
--6 × log2(1 + PRs opened in the last 30 days) × (1 − landing rate)²
-```
-
-The landing rate combines long-term and recent behavior:
-
-- **History sets the expectation.** The user's merge rate on PRs opened before the last 30 days, smoothed so that no history means 50%.
-- **Recent resolved PRs update it.** PRs opened in the last 30 days that were merged or closed. History counts as at most 20 PRs' worth of evidence, so a long record cushions a bad month but can't hide dozens of recent PRs that didn't land.
-- **Open PRs count as neither.** Some repos take months to review, so a PR waiting for review isn't held against its author.
-
-| Case | Pattern |
-|---|---|
-| 108 PRs in 17 days from a new account, 3 of 26 resolved merged | −29.8 |
-| 83 PRs in 30 days, most still waiting for review, 33 of 33 merged before | −1.5 |
-| Long-time contributor with nothing in the last 30 days | 0 |
-
-Because open PRs are neutral, an account whose spray PRs are all still open isn't penalized much until they start getting closed. The new-account flag below covers that case.
-
-| Tier | Score |
-|---|---|
-| Novice | below 15 |
-| Contributor | 15 |
-| Regular | 40 |
-| Veteran | 80 |
-| Core | 150 |
-
-The weights and tiers in [`score.go`](score.go) are a first guess.
+Known gaps being worked on: [#6](https://github.com/YakDriver/gh-averyindex/issues/6) (the rework sample is the most recently opened merged PRs, not the most recently merged), [#7](https://github.com/YakDriver/gh-averyindex/issues/7) (self-upvotes count, and reviews also count as threads), [#8](https://github.com/YakDriver/gh-averyindex/issues/8) (bot accounts aren't searched correctly).
 
 ## Costs
 
-One user takes about 12 search API calls and 2 or more GraphQL queries, usually 10 to 15 seconds.
-
-GitHub limits search to 30 requests per minute and also has an unpublished secondary limit that trips when you score several users in a row. When either one hits, the tool prints a line to stderr saying how long it's waiting and until when, then retries (up to 3 times, waiting at most 2 minutes each). If the wait would be longer, it says so and exits.
+One user takes about 15 search API calls plus a few other requests, usually 10 to 15 seconds. If GitHub rate-limits the tool, it prints how long it's waiting on stderr and retries.
 
 ## Development
 
