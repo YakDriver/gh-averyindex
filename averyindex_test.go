@@ -345,6 +345,7 @@ func TestDriveBy(t *testing.T) {
 	}{
 		{"PRs only", Metrics{PRsOpened: 3}, true},
 		{"PRs and a comment", Metrics{PRsOpened: 3, Threads: 1}, false},
+		{"merged PRs, nothing else", Metrics{PRsOpened: 2, PRsMerged: 2}, false},
 		{"nothing at all", Metrics{}, false},
 		{"issues only", Metrics{Issues: 2}, false},
 	}
@@ -495,6 +496,88 @@ func TestScoreDormantVeteranStaysStrong(t *testing.T) {
 		Global: Global{AccountAgeDays: 3000, PRsOpened: 300, PRsMerged: 280, MergedElsewhere: 245}}
 	if r := score(dormant, defaultWeights); r.Score < 80 {
 		t.Errorf("dormant veteran scored %d (%s), want 80+", r.Score, r.Tier)
+	}
+}
+
+func flagCodes(m Metrics) []string {
+	var codes []string
+	for _, f := range score(m, defaultWeights).Flags {
+		codes = append(codes, f.Code)
+	}
+	return codes
+}
+
+func TestFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		m    Metrics
+		want []string
+	}{
+		{"nothing", Metrics{}, nil},
+		{"honest newcomer, one closed PR", Metrics{PRsOpened: 1, Threads: 2,
+			Global: Global{AccountAgeDays: 1500, PRsOpened: 1, RecentPRs: 1, RecentClosedUnmerged: 1}}, nil},
+		{"spray, mostly closed", Metrics{PRsOpened: 2, Global: Global{AccountCreated: testNow, AccountAgeDays: 17,
+			PRsOpened: 108, PRsMerged: 3, PRsOpen: 82, MergedElsewhere: 3,
+			RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23, RecentRepos: 22}},
+			[]string{flagNotLanding, flagNewBurst, flagDriveBy}},
+		// The gap left by #2: nothing closed yet, so no penalty to speak of.
+		{"spray, all still open", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
+			PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}},
+			[]string{flagNewBurst}},
+		{"new account, few repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 30,
+			PRsOpened: 30, PRsOpen: 30, RecentPRs: 30, RecentRepos: 3}}, nil},
+		{"old account, many repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 2000,
+			PRsOpened: 60, PRsMerged: 50, RecentPRs: 40, RecentMerged: 35, RecentRepos: 30}}, nil},
+		{"slow review queue", Metrics{PRsOpened: 10, PRsMerged: 3, PRsOpen: 7, Threads: 5,
+			Global: Global{AccountCreated: testNow, AccountAgeDays: 1487, PRsOpened: 116, PRsMerged: 38, PRsOpen: 72,
+				MergedElsewhere: 35, RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6, RecentRepos: 8}}, nil},
+		{"drive-by only", Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 400}}, []string{flagDriveBy}},
+		{"merged here, nothing else", Metrics{PRsOpened: 2, PRsMerged: 2, Global: Global{AccountAgeDays: 5000}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := flagCodes(tt.m); !slices.Equal(got, tt.want) {
+				t.Errorf("flags = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFlagsDontChangeScore(t *testing.T) {
+	m := Metrics{Global: Global{AccountCreated: testNow, AccountAgeDays: 3, PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}
+	r := score(m, defaultWeights)
+	var sum float64
+	for _, c := range r.Components {
+		sum += c.Points
+	}
+	if len(r.Flags) == 0 || int(math.Round(sum)) != r.Score {
+		t.Errorf("flags %v, components sum %.1f, score %d", r.Flags, sum, r.Score)
+	}
+}
+
+func TestRenderFlagsInHeader(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", Global: Global{AccountCreated: testNow, AccountAgeDays: 6,
+		PRsOpened: 50, PRsMerged: 26, RecentPRs: 50, RecentMerged: 26, RecentRepos: 35}, Threads: 1}
+	var buf bytes.Buffer
+	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(buf.String(), "\n")
+	want := "  ⚠ New account: 6 days old, 50 PRs across 35 repos in 30 days, 26 merged so far"
+	if len(lines) < 2 || lines[1] != want {
+		t.Errorf("line 2 = %q, want %q", lines[1], want)
+	}
+}
+
+func TestRenderJSONFlags(t *testing.T) {
+	var buf bytes.Buffer
+	m := Metrics{User: "u", Repo: "o/r"}
+	if err := renderJSON(&buf, m, score(m, defaultWeights)); err != nil {
+		t.Fatal(err)
+	}
+	// An empty list, not null, so scripts can always iterate it.
+	if !strings.Contains(buf.String(), `"flags": []`) {
+		t.Errorf("missing empty flags array:\n%s", buf.String())
 	}
 }
 
@@ -727,7 +810,7 @@ func TestRenderTextDriveBy(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"Novice", "Drive-by:", "PR #1, 2026-10-01"} {
+	for _, want := range []string{"Novice", "⚠ Drive-by:", "PR #1, 2026-10-01"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

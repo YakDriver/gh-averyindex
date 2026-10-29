@@ -103,6 +103,62 @@ type Result struct {
 	Components []Component `json:"components"`
 	Score      int         `json:"averyindex"`
 	Tier       string      `json:"tier"`
+	Flags      []Flag      `json:"flags"`
+}
+
+// Flag is something a maintainer should look at more closely. Flags state
+// facts; they don't change the score.
+type Flag struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+const (
+	flagNotLanding = "not-landing"
+	flagNewBurst   = "new-account-burst"
+	flagDriveBy    = "drive-by"
+)
+
+const (
+	// notLandingFlagPoints is how negative the Pattern penalty must be, and
+	// it must also outweigh everything else, before it's flagged. The floor
+	// keeps a newcomer with one closed PR from being flagged.
+	notLandingFlagPoints = -10
+
+	// A new account opening many PRs across many repos is flagged even
+	// before any are closed.
+	burstMaxAgeDays = 90
+	burstMinPRs     = 20
+	burstMinRepos   = 10
+)
+
+func flags(m Metrics, r Result) []Flag {
+	g := m.Global
+	var pattern, rest float64
+	for _, c := range r.Components {
+		if c.Group == groupPattern {
+			pattern += c.Points
+		} else {
+			rest += c.Points
+		}
+	}
+
+	fs := []Flag{}
+	if pattern <= notLandingFlagPoints && -pattern > rest {
+		fs = append(fs, Flag{flagNotLanding, fmt.Sprintf(
+			"Recent PRs mostly not landing: %s of %s resolved merged in %d days",
+			thousands(g.RecentMerged), thousands(g.RecentMerged+g.RecentClosedUnmerged), recentDays)})
+	}
+	if !g.AccountCreated.IsZero() && g.AccountAgeDays < burstMaxAgeDays &&
+		g.RecentPRs >= burstMinPRs && g.RecentRepos >= burstMinRepos {
+		fs = append(fs, Flag{flagNewBurst, fmt.Sprintf(
+			"New account: %s old, %s PRs across %d repos in %d days, %s merged so far",
+			age(g.AccountAgeDays), thousands(g.RecentPRs), g.RecentRepos, recentDays, thousands(g.RecentMerged))})
+	}
+	if m.DriveBy() {
+		fs = append(fs, Flag{flagDriveBy, "Drive-by: PRs here, none merged, and no issues, comments, or reviews"})
+	}
+	return fs
 }
 
 func points(n, weight float64) float64 {
@@ -179,6 +235,7 @@ func score(m Metrics, w Weights) Result {
 	}
 	r.Score = int(math.Round(total))
 	r.Tier = tierFor(r.Score)
+	r.Flags = flags(m, r)
 	return r
 }
 

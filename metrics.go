@@ -167,9 +167,11 @@ func (m Metrics) Participation() int {
 	return m.Issues + m.Threads + m.Reviews
 }
 
-// DriveBy reports whether the user has opened PRs and done nothing else.
+// DriveBy reports whether the user has opened PRs here, none were merged, and
+// they've done nothing else here. Someone with merged PRs has already been
+// through review, so they aren't flagged.
 func (m Metrics) DriveBy() bool {
-	return m.PRsOpened > 0 && m.Participation() == 0
+	return m.PRsOpened > 0 && m.PRsMerged == 0 && m.Participation() == 0
 }
 
 // AvgCredit is the average credit across the recent merged PRs checked for
