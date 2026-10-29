@@ -23,6 +23,7 @@ import (
 type fakeSearch struct {
 	total int
 	items []searchItem
+	next  string // cursor for SearchNext, if there's another page
 }
 
 type fakeSource struct {
@@ -37,13 +38,32 @@ type fakeSource struct {
 	err         error
 
 	thumbsQuery, thumbsAuthor string
+	batches                   int
 }
 
-func (f *fakeSource) SearchPage(q, order string, page int) (int, []searchItem, error) {
-	key := fmt.Sprintf("%s|%s|page%d", order, q, page)
+func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
+	f.batches++
+	var results []searchResult
+	for _, r := range reqs {
+		total, items, err := f.Search(r.Query, r.Order, r.N)
+		if err != nil {
+			return nil, err
+		}
+		res := searchResult{Total: total, Items: items}
+		// Like GraphQL, an item search with more results has a cursor.
+		if r.N > 0 && total > len(items) {
+			res.HasNext, res.EndCursor = true, "page2"
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
+func (f *fakeSource) SearchNext(q, order, cursor string) (searchResult, error) {
+	key := order + "|" + q + "|" + cursor
 	f.queries = append(f.queries, key)
 	r := f.search[key]
-	return r.total, r.items, f.err
+	return searchResult{Total: r.total, Items: r.items, HasNext: r.next != "", EndCursor: r.next}, f.err
 }
 
 func (f *fakeSource) OwnedRepoStars(string) ([]int, error) {
@@ -343,6 +363,19 @@ func TestPlural(t *testing.T) {
 		if got := plural(n, "PR"); got != want {
 			t.Errorf("plural(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestCollectSendsSearchesInOneBatch(t *testing.T) {
+	src := &fakeSource{}
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if src.batches != 1 {
+		t.Errorf("%d search batches, want 1 (#26)", src.batches)
+	}
+	if slices.ContainsFunc(src.queries, func(q string) bool { return strings.Contains(q, "|page") }) {
+		t.Errorf("paged with nothing to page: %q", src.queries)
 	}
 }
 
@@ -1100,12 +1133,6 @@ func TestRetryNotice(t *testing.T) {
 	want := "GitHub rate limit hit. Waiting 1m0s (until 09:41:00) before retrying, attempt 1 of 3. Not hung."
 	if got != want {
 		t.Errorf("retryNotice() =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestRepoFromURL(t *testing.T) {
-	if got := repoFromURL("https://api.github.com/repos/o/r"); got != "o/r" {
-		t.Errorf("repoFromURL() = %q", got)
 	}
 }
 

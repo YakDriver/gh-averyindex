@@ -54,11 +54,12 @@ type rawPR struct {
 // source is the subset of GitHub data that collect needs. It exists so
 // collect can be tested without the network.
 type source interface {
-	// Search runs an issue/PR search and returns the total count and up to n
-	// items. order is "asc" or "desc" by creation time, or "" for best match.
-	Search(query, order string, n int) (total int, items []searchItem, err error)
-	// SearchPage returns one page (1-based) of 100 results for query.
-	SearchPage(query, order string, page int) (total int, items []searchItem, err error)
+	// SearchMany runs several issue/PR searches together and returns a
+	// result for each request, in order.
+	SearchMany(reqs []searchReq) ([]searchResult, error)
+	// SearchNext returns the page of up to 100 results after cursor, as
+	// returned in a previous result's EndCursor.
+	SearchNext(query, order, cursor string) (searchResult, error)
 	// MergedPRs returns the total count of merged PRs matching query and the
 	// n most recently merged of them in repo, with commits.
 	MergedPRs(repo, query string, n int) (total int, prs []rawPR, err error)
@@ -70,6 +71,23 @@ type source interface {
 	// GitHub search returns at most 1,000 results, so truncated reports
 	// whether the sum is incomplete.
 	ThumbsUp(query, author string) (total int, truncated bool, err error)
+}
+
+// searchReq is one issue/PR search. Order is "asc" or "desc" by creation
+// time, or "" for best match. N is how many items to return; 0 returns only
+// the count.
+type searchReq struct {
+	Query string
+	Order string
+	N     int
+}
+
+type searchResult struct {
+	Total int
+	Items []searchItem
+	// EndCursor continues an item search with SearchNext when HasNext.
+	EndCursor string
+	HasNext   bool
 }
 
 type gitHub struct {
@@ -146,57 +164,133 @@ func (g *gitHub) Account(user string) (account, error) {
 	return resp, err
 }
 
-func (g *gitHub) Search(query, order string, n int) (int, []searchItem, error) {
-	return g.search(query, order, max(1, n), 1)
+// SearchMany sends every search in one GraphQL request, using an alias for
+// each. One request is faster than many REST calls, and GraphQL search
+// isn't subject to the REST search limit of 30 requests per minute (#26).
+func (g *gitHub) SearchMany(reqs []searchReq) ([]searchResult, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	var q strings.Builder
+	vars := map[string]any{}
+	q.WriteString("query(")
+	for i := range reqs {
+		if i > 0 {
+			q.WriteString(", ")
+		}
+		fmt.Fprintf(&q, "$q%d: String!", i)
+	}
+	q.WriteString(") {\n")
+	for i, r := range reqs {
+		vars[fmt.Sprintf("q%d", i)] = r.Query + graphQLSort(r.Order)
+		fmt.Fprintf(&q, "  s%d: search(query: $q%d, type: ISSUE, first: %d) { issueCount", i, i, min(r.N, searchPageSize))
+		if r.N > 0 {
+			q.WriteString(" pageInfo { hasNextPage endCursor } nodes { __typename ...item }")
+		}
+		q.WriteString(" }\n")
+	}
+	q.WriteString("}\n")
+	// GraphQL rejects a fragment that isn't used, so a batch of counts only
+	// leaves it out.
+	if slices.ContainsFunc(reqs, func(r searchReq) bool { return r.N > 0 }) {
+		q.WriteString(itemFragments)
+	}
+
+	var resp map[string]searchNode
+	if err := g.gqlDo(q.String(), vars, &resp); err != nil {
+		return nil, fmt.Errorf("searches: %w", err)
+	}
+	results := make([]searchResult, len(reqs))
+	for i := range reqs {
+		results[i] = resp[fmt.Sprintf("s%d", i)].result()
+	}
+	return results, nil
+}
+
+type searchNode struct {
+	IssueCount int
+	PageInfo   struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+	Nodes []itemNode
+}
+
+func (n searchNode) result() searchResult {
+	r := searchResult{Total: n.IssueCount, HasNext: n.PageInfo.HasNextPage, EndCursor: n.PageInfo.EndCursor}
+	for _, it := range n.Nodes {
+		if it.Typename == "Issue" || it.Typename == "PullRequest" {
+			r.Items = append(r.Items, it.item())
+		}
+	}
+	return r
+}
+
+const searchNextQuery = `
+query($q: String!, $cursor: String!) {
+  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { __typename ...item }
+  }
+}
+` + itemFragments
+
+// SearchNext continues a search in GraphQL, so paging doesn't use the REST
+// search limit either.
+func (g *gitHub) SearchNext(query, order, cursor string) (searchResult, error) {
+	var resp struct{ Search searchNode }
+	vars := map[string]any{"q": query + graphQLSort(order), "cursor": cursor}
+	if err := g.gqlDo(searchNextQuery, vars, &resp); err != nil {
+		return searchResult{}, fmt.Errorf("search %q: %w", query, err)
+	}
+	return resp.Search.result(), nil
+}
+
+// graphQLSort turns an order into a search qualifier. GraphQL search has no
+// separate sort argument.
+func graphQLSort(order string) string {
+	switch order {
+	case "asc":
+		return " sort:created-asc"
+	case "desc":
+		return " sort:created-desc"
+	}
+	return ""
+}
+
+const itemFragments = `fragment item on SearchResultItem {
+  ... on Issue { number createdAt repository { nameWithOwner } author { login __typename } }
+  ... on PullRequest { number createdAt repository { nameWithOwner } author { login __typename } }
+}`
+
+type itemNode struct {
+	Typename   string `json:"__typename"`
+	Number     int
+	CreatedAt  time.Time
+	Repository struct{ NameWithOwner string }
+	Author     *struct {
+		Login    string
+		Typename string `json:"__typename"`
+	}
+}
+
+func (n itemNode) item() searchItem {
+	it := searchItem{
+		Number:    n.Number,
+		CreatedAt: n.CreatedAt,
+		IsPR:      n.Typename == "PullRequest",
+		Repo:      n.Repository.NameWithOwner,
+	}
+	if n.Author != nil {
+		it.Author = n.Author.Login
+		it.AuthorBot = n.Author.Typename == "Bot"
+	}
+	return it
 }
 
 // searchPageSize is the most results the search API returns per page.
 const searchPageSize = 100
-
-func (g *gitHub) SearchPage(query, order string, page int) (int, []searchItem, error) {
-	return g.search(query, order, searchPageSize, page)
-}
-
-func (g *gitHub) search(query, order string, n, page int) (int, []searchItem, error) {
-	v := url.Values{}
-	v.Set("q", query)
-	v.Set("per_page", strconv.Itoa(n))
-	if page > 1 {
-		v.Set("page", strconv.Itoa(page))
-	}
-	if order != "" {
-		v.Set("sort", "created")
-		v.Set("order", order)
-	}
-	var resp struct {
-		TotalCount int `json:"total_count"`
-		Items      []struct {
-			Number        int             `json:"number"`
-			CreatedAt     time.Time       `json:"created_at"`
-			PullRequest   json.RawMessage `json:"pull_request"`
-			RepositoryURL string          `json:"repository_url"`
-			User          struct {
-				Login string `json:"login"`
-				Type  string `json:"type"`
-			} `json:"user"`
-		} `json:"items"`
-	}
-	if err := g.get("search/issues?"+v.Encode(), &resp); err != nil {
-		return 0, nil, fmt.Errorf("search %q: %w", query, err)
-	}
-	items := make([]searchItem, 0, len(resp.Items))
-	for _, it := range resp.Items[:min(n, len(resp.Items))] {
-		items = append(items, searchItem{
-			Number:    it.Number,
-			CreatedAt: it.CreatedAt,
-			IsPR:      len(it.PullRequest) > 0,
-			Repo:      repoFromURL(it.RepositoryURL),
-			Author:    it.User.Login,
-			AuthorBot: it.User.Type == "Bot",
-		})
-	}
-	return resp.TotalCount, items, nil
-}
 
 const (
 	// maxRetries is how many times a rate-limited request is retried.
@@ -305,14 +399,6 @@ func rateLimitWait(err error, now time.Time) (time.Duration, bool) {
 		return time.Minute, true
 	}
 	return 0, false
-}
-
-// repoFromURL turns "https://api.github.com/repos/owner/name" into "owner/name".
-func repoFromURL(u string) string {
-	if _, after, ok := strings.Cut(u, "/repos/"); ok {
-		return after
-	}
-	return u
 }
 
 // maxCommits is how many commits per PR are fetched for rework.

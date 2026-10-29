@@ -138,6 +138,100 @@ func TestThumbsUpSamplesAndSkipsSelf(t *testing.T) {
 	}
 }
 
+func TestSearchManyOneRequest(t *testing.T) {
+	requests := 0
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		requests++
+		// Queries go in variables, so quotes and colons need no escaping.
+		want := map[string]any{
+			"q0": `repo:o/r is:pr author:u "quoted"`,
+			"q1": "repo:o/r author:u sort:created-asc",
+			"q2": "repo:o/r author:u sort:created-desc",
+		}
+		for k, v := range want {
+			if vars[k] != v {
+				t.Errorf("%s = %v, want %v", k, vars[k], v)
+			}
+		}
+		if !strings.Contains(query, "s0: search(query: $q0, type: ISSUE, first: 0) { issueCount }") {
+			t.Errorf("count search should ask for no nodes:\n%s", query)
+		}
+		if !strings.Contains(query, "s2: search(query: $q2, type: ISSUE, first: 100) { issueCount pageInfo { hasNextPage endCursor } nodes") {
+			t.Errorf("item search should be capped at 100 per page:\n%s", query)
+		}
+		// Aliases come back in a different order than they were sent.
+		return `{"data":{
+			"s2":{"issueCount":250,"nodes":[
+				{"__typename":"PullRequest","number":9,"createdAt":"2026-10-28T00:00:00Z",
+				 "repository":{"nameWithOwner":"o/r"},"author":{"login":"u","__typename":"User"}},
+				{"__typename":"Issue","number":8,"createdAt":"2026-10-27T00:00:00Z",
+				 "repository":{"nameWithOwner":"a/b"},"author":{"login":"dependabot","__typename":"Bot"}},
+				{"__typename":"Issue","number":7,"createdAt":"2026-10-26T00:00:00Z",
+				 "repository":{"nameWithOwner":"a/b"},"author":null}]},
+			"s0":{"issueCount":12},
+			"s1":{"issueCount":250,"nodes":[{"__typename":"Issue","number":1,"createdAt":"2017-01-01T00:00:00Z",
+				 "repository":{"nameWithOwner":"o/r"},"author":{"login":"u","__typename":"User"}}]}}}`
+	}).client(t)
+
+	results, err := gh.SearchMany([]searchReq{
+		{Query: `repo:o/r is:pr author:u "quoted"`},
+		{Query: "repo:o/r author:u", Order: "asc", N: 1},
+		{Query: "repo:o/r author:u", Order: "desc", N: 500},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+	if len(results) != 3 || results[0].Total != 12 || results[0].Items != nil {
+		t.Fatalf("count result = %+v", results)
+	}
+	if got := results[1].Items; len(got) != 1 || got[0].Number != 1 || got[0].IsPR {
+		t.Errorf("first authored = %+v", got)
+	}
+	want := []searchItem{
+		{Number: 9, CreatedAt: day("2026-10-28"), IsPR: true, Repo: "o/r", Author: "u"},
+		{Number: 8, CreatedAt: day("2026-10-27"), Repo: "a/b", Author: "dependabot", AuthorBot: true},
+		{Number: 7, CreatedAt: day("2026-10-26"), Repo: "a/b"},
+	}
+	if results[2].Total != 250 || !slices.Equal(results[2].Items, want) {
+		t.Errorf("items = %+v (total %d)", results[2].Items, results[2].Total)
+	}
+}
+
+func TestSearchManyCountsOnly(t *testing.T) {
+	// Copilot on #27: GraphQL rejects a fragment that isn't used.
+	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
+		if strings.Contains(query, "fragment") || strings.Contains(query, "pageInfo") {
+			t.Errorf("count-only batch includes item fields:\n%s", query)
+		}
+		return `{"data":{"s0":{"issueCount":4},"s1":{"issueCount":0}}}`
+	}).client(t)
+	results, err := gh.SearchMany([]searchReq{{Query: "a"}, {Query: "b"}})
+	if err != nil || len(results) != 2 || results[0].Total != 4 || results[1].Total != 0 {
+		t.Errorf("SearchMany() = %+v, %v", results, err)
+	}
+}
+
+func TestSearchNext(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		if vars["q"] != "is:pr author:u sort:created-desc" || vars["cursor"] != "c1" {
+			t.Errorf("vars = %v", vars)
+		}
+		if !strings.Contains(query, "after: $cursor") || !strings.Contains(query, "fragment item") {
+			t.Errorf("query:\n%s", query)
+		}
+		return `{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":false,"endCursor":"c2"},
+			"nodes":[{"__typename":"PullRequest","number":3,"createdAt":"2026-10-01T00:00:00Z",
+			"repository":{"nameWithOwner":"x/y"},"author":{"login":"u","__typename":"User"}}]}}}`
+	}).client(t)
+	r, err := gh.SearchNext("is:pr author:u", "desc", "c1")
+	if err != nil || r.Total != 150 || r.HasNext || len(r.Items) != 1 || r.Items[0].Repo != "x/y" {
+		t.Errorf("SearchNext() = %+v, %v", r, err)
+	}
+}
+
 func restClient(t *testing.T, status int, body string, wantPath string) *gitHub {
 	t.Helper()
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
