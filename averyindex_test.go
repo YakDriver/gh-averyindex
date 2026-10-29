@@ -76,17 +76,19 @@ func TestCollect(t *testing.T) {
 	open := searchItem{Number: 9, CreatedAt: day("2026-10-01"), IsPR: true}
 	src := &fakeSource{
 		search: map[string]fakeSearch{
-			"|" + r + " is:pr author:u":                {total: 10},
-			"|" + r + " is:issue author:u":             {total: 4},
-			"|" + r + " commenter:u -author:u":         {total: 20},
-			"|" + r + " is:pr reviewed-by:u -author:u": {total: 5},
-			"asc|" + r + " author:u":                   {total: 14, items: []searchItem{first}},
-			"desc|" + r + " author:u":                  {total: 14, items: []searchItem{last}},
-			"desc|" + r + " is:pr author:u is:open":    {total: 1, items: []searchItem{open}},
-			"|" + g:                                    {total: 110},
-			"|" + g + " is:merged":                     {total: 40},
-			"|" + g + " is:open":                       {total: 30},
-			"|" + g + " is:merged -repo:o/r":           {total: 34},
+			"|" + r + " is:pr author:u":                             {total: 10},
+			"|" + r + " is:issue author:u":                          {total: 4},
+			"|" + r + " commenter:u -author:u":                      {total: 20},
+			"|" + r + " is:pr reviewed-by:u -author:u":              {total: 5},
+			"asc|" + r + " author:u":                                {total: 14, items: []searchItem{first}},
+			"desc|" + r + " author:u":                               {total: 14, items: []searchItem{last}},
+			"desc|" + r + " is:pr author:u is:open":                 {total: 1, items: []searchItem{open}},
+			"|" + g:                                                 {total: 110},
+			"|" + g + " is:merged":                                  {total: 40},
+			"|" + g + " is:open":                                    {total: 30},
+			"|" + g + " is:merged -repo:o/r":                        {total: 34},
+			"|" + g + " created:>=2026-09-29 is:merged":             {total: 2},
+			"|" + g + " created:>=2026-09-29 is:closed is:unmerged": {total: 1},
 			"desc|" + g + " created:>=2026-09-29": {total: 4, items: []searchItem{
 				{Repo: "a/x"}, {Repo: "b/y"}, {Repo: "b/y"}, {Repo: "c/z"},
 			}},
@@ -130,6 +132,7 @@ func TestCollect(t *testing.T) {
 		t.Errorf("CodeCredit() = %v, want 4.5 (6 merged × 0.75)", got)
 	}
 	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30, MergedElsewhere: 34,
+		RecentMerged: 2, RecentClosedUnmerged: 1,
 		RecentPRs: 4, RecentRepos: 3, RecentTopRepo: "b/y", RecentTopCount: 2, RecentSampled: 4}
 	if m.Global != wantGlobal {
 		t.Errorf("Global =\n%+v\nwant\n%+v", m.Global, wantGlobal)
@@ -153,8 +156,8 @@ func TestCollectGlobalScope(t *testing.T) {
 			global = append(global, q)
 		}
 	}
-	if len(global) != 5 {
-		t.Fatalf("got %d global queries, want 5: %q", len(global), global)
+	if len(global) != 7 {
+		t.Fatalf("got %d global queries, want 7: %q", len(global), global)
 	}
 	for _, q := range global {
 		// Own repos are excluded because anyone can merge their own PRs (#1).
@@ -226,12 +229,31 @@ func TestRecentTopRepoTieBreak(t *testing.T) {
 	}
 }
 
-func TestSmoothedMergeRate(t *testing.T) {
-	if got := (Global{}).SmoothedMergeRate(); got != 0.5 {
-		t.Errorf("no history = %v, want 0.5", got)
+func TestLandingRate(t *testing.T) {
+	tests := []struct {
+		name     string
+		g        Global
+		min, max float64
+	}{
+		{"no history", Global{}, 0.5, 0.5},
+		{"history only", Global{PRsOpened: 8, PRsMerged: 8}, 0.9, 0.9},
+		// Open PRs count as neither landed nor failed, however long they've
+		// waited, because some repos take months to review.
+		{"slow queue: 72 open, good history", Global{PRsOpened: 116, PRsMerged: 38, PRsOpen: 72,
+			RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6}, 0.78, 0.82},
+		// History is capped at priorWeight PRs, so a long record cushions a
+		// bad month but doesn't hide it.
+		{"long record, bad month", Global{PRsOpened: 1040, PRsMerged: 1002, PRsOpen: 0,
+			RecentPRs: 40, RecentMerged: 2, RecentClosedUnmerged: 38}, 0.35, 0.40},
+		{"new account, mostly closed", Global{PRsOpened: 108, PRsMerged: 3, PRsOpen: 82,
+			RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23}, 0.14, 0.15},
 	}
-	if got := (Global{PRsOpened: 8, PRsMerged: 8}).SmoothedMergeRate(); got != 0.9 {
-		t.Errorf("8 of 8 = %v, want 0.9", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.g.LandingRate(); got < tt.min-1e-9 || got > tt.max+1e-9 {
+				t.Errorf("LandingRate() = %.3f, want %.2f to %.2f", got, tt.min, tt.max)
+			}
+		})
 	}
 }
 
@@ -422,13 +444,24 @@ func TestScoreNotLanding(t *testing.T) {
 		return 0
 	}
 
-	// 106 PRs in 17 days, 2 merged, 19 closed unmerged.
-	spray := notLanding(Global{PRsOpened: 106, PRsMerged: 2, PRsOpen: 85, RecentPRs: 106})
-	// 60 PRs a month with a 90% merge rate.
-	prolific := notLanding(Global{PRsOpened: 2000, PRsMerged: 1800, PRsOpen: 0, RecentPRs: 60})
+	// 108 PRs in 17 days from a new account: 3 merged, 23 closed unmerged.
+	spray := notLanding(Global{PRsOpened: 108, PRsMerged: 3, PRsOpen: 82, RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23})
+	// 60 PRs a month, 54 merged, with a long good record.
+	prolific := notLanding(Global{PRsOpened: 2000, PRsMerged: 1800, RecentPRs: 60, RecentMerged: 54, RecentClosedUnmerged: 6})
 	// One open PR, no history.
 	first := notLanding(Global{PRsOpened: 1, PRsOpen: 1, RecentPRs: 1})
+	// Community contributor in a slow repo: 83 PRs in 30 days, most still
+	// waiting for review, good record before that.
+	slowQueue := notLanding(Global{PRsOpened: 116, PRsMerged: 38, PRsOpen: 72, RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6})
+	// Long-time contributor who hasn't opened anything lately.
+	dormant := notLanding(Global{PRsOpened: 300, PRsMerged: 280})
 
+	if slowQueue < -3 {
+		t.Errorf("slow-queue penalty = %.1f, want above -3", slowQueue)
+	}
+	if dormant != 0 {
+		t.Errorf("dormant penalty = %.1f, want 0", dormant)
+	}
 	if spray > -25 {
 		t.Errorf("spray penalty = %.1f, want below -25", spray)
 	}
@@ -442,7 +475,8 @@ func TestScoreNotLanding(t *testing.T) {
 
 func TestScoreSprayAccountScoresBadly(t *testing.T) {
 	// The pattern from a 17-day-old account that opened 106 PRs across 22 repos.
-	spray := Metrics{PRsOpened: 2, Global: Global{AccountAgeDays: 17, PRsOpened: 106, PRsMerged: 2, PRsOpen: 85, RecentPRs: 106}}
+	spray := Metrics{PRsOpened: 2, Global: Global{AccountAgeDays: 17, PRsOpened: 108, PRsMerged: 3, PRsOpen: 82,
+		RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23, MergedElsewhere: 3}}
 	// A real newcomer: established account, one closed PR here.
 	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, MergedElsewhere: 25, RecentPRs: 2}}
 
@@ -452,6 +486,15 @@ func TestScoreSprayAccountScoresBadly(t *testing.T) {
 	}
 	if n <= 0 {
 		t.Errorf("newcomer scored %d, want positive", n)
+	}
+}
+
+func TestScoreDormantVeteranStaysStrong(t *testing.T) {
+	// Years of merged work here and elsewhere, nothing in the last month.
+	dormant := Metrics{PRsOpened: 40, PRsMerged: 35, Threads: 60, Issues: 10, ThumbsUp: 30,
+		Global: Global{AccountAgeDays: 3000, PRsOpened: 300, PRsMerged: 280, MergedElsewhere: 245}}
+	if r := score(dormant, defaultWeights); r.Score < 80 {
+		t.Errorf("dormant veteran scored %d (%s), want 80+", r.Score, r.Tier)
 	}
 }
 
@@ -657,7 +700,8 @@ func TestRenderText(t *testing.T) {
 	for _, want := range []string{
 		`Account created +2024-10-29 \(2\.0 years ago\)`,
 		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
-		`Last 30 days +150 PRs across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
+		`Last 30 days +150 PRs · 0 merged · 0 closed unmerged · 150 open`,
+		`\n +across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
 		`Cap \(elsewhere is at most \+20\) +-9\.7`,
 		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {

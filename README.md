@@ -102,11 +102,22 @@ Signals that depend on someone else's judgment (a maintainer merged it without r
 **Pattern** penalizes opening many PRs that don't land. It's uncapped:
 
 ```
--6 × log2(1 + PRs opened in the last 30 days) × (1 − merge rate)²
-merge rate = (merged + 1) / (resolved + 2)
+-6 × log2(1 + PRs opened in the last 30 days) × (1 − landing rate)²
 ```
 
-The squared term means volume alone costs little: 60 PRs a month at a 90% merge rate loses about 1 point, while 106 PRs in 17 days at 8% loses about 32. The +1/+2 smoothing starts someone with no history at 50%, so a first PR barely registers.
+The landing rate combines long-term and recent behavior:
+
+- **History sets the expectation.** The user's merge rate on PRs opened before the last 30 days, smoothed so that no history means 50%.
+- **Recent resolved PRs update it.** PRs opened in the last 30 days that were merged or closed. History counts as at most 20 PRs' worth of evidence, so a long record cushions a bad month but can't hide dozens of recent PRs that didn't land.
+- **Open PRs count as neither.** Some repos take months to review, so a PR waiting for review isn't held against its author.
+
+| Case | Pattern |
+|---|---|
+| 108 PRs in 17 days from a new account, 3 of 26 resolved merged | −29.8 |
+| 83 PRs in 30 days, most still waiting for review, 33 of 33 merged before | −1.5 |
+| Long-time contributor with nothing in the last 30 days | 0 |
+
+Because open PRs are neutral, an account whose spray PRs are all still open isn't penalized much until they start getting closed. The rest of the report (account age, PRs across many repos, the drive-by flag) still shows the pattern.
 
 | Tier | Score |
 |---|---|

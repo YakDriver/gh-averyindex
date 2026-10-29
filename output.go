@@ -88,7 +88,10 @@ func renderGlobal(w io.Writer, g Global) {
 	}
 	recent := fmt.Sprintf("%s PRs", thousands(g.RecentPRs))
 	if g.RecentPRs > 0 {
-		recent += fmt.Sprintf(" across %d repos (most: %d in %s)", g.RecentRepos, g.RecentTopCount, g.RecentTopRepo)
+		recent += fmt.Sprintf(" · %s merged · %s closed unmerged · %s open",
+			thousands(g.RecentMerged), thousands(g.RecentClosedUnmerged),
+			thousands(max(0, g.RecentPRs-g.RecentMerged-g.RecentClosedUnmerged)))
+		recent += fmt.Sprintf("\n\t  across %d repos (most: %d in %s)", g.RecentRepos, g.RecentTopCount, g.RecentTopRepo)
 		if g.RecentPRs > g.RecentSampled {
 			recent += fmt.Sprintf(", repos from the newest %d", g.RecentSampled)
 		}
