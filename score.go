@@ -124,6 +124,11 @@ const (
 	// it must also outweigh everything else, before it's flagged. The floor
 	// keeps a newcomer with one closed PR from being flagged.
 	notLandingFlagPoints = -10
+	// notLandingMinResolved is how many recent PRs must have resolved before
+	// the flag can say they mostly didn't land. The penalty can be large with
+	// nothing resolved (the 50% prior times high volume), but then there's no
+	// recent outcome to report; the new-account flag covers that case.
+	notLandingMinResolved = 5
 
 	// A new account opening many PRs across many repos is flagged even
 	// before any are closed.
@@ -144,16 +149,23 @@ func flags(m Metrics, r Result) []Flag {
 	}
 
 	fs := []Flag{}
-	if pattern <= notLandingFlagPoints && -pattern > rest {
+	resolved := g.RecentMerged + g.RecentClosedUnmerged
+	if pattern <= notLandingFlagPoints && -pattern > rest &&
+		resolved >= notLandingMinResolved && 2*g.RecentMerged < resolved {
 		fs = append(fs, Flag{flagNotLanding, fmt.Sprintf(
 			"Recent PRs mostly not landing: %s of %s resolved merged in %d days",
-			thousands(g.RecentMerged), thousands(g.RecentMerged+g.RecentClosedUnmerged), recentDays)})
+			thousands(g.RecentMerged), thousands(resolved), recentDays)})
 	}
 	if !g.AccountCreated.IsZero() && g.AccountAgeDays < burstMaxAgeDays &&
 		g.RecentPRs >= burstMinPRs && g.RecentRepos >= burstMinRepos {
+		repos := fmt.Sprintf("%d repos", g.RecentRepos)
+		if g.RecentSampled < g.RecentPRs {
+			// Repos are counted from a sample, so this is a lower bound.
+			repos = "at least " + repos
+		}
 		fs = append(fs, Flag{flagNewBurst, fmt.Sprintf(
-			"New account: %s old, %s PRs across %d repos in %d days, %s merged so far",
-			age(g.AccountAgeDays), thousands(g.RecentPRs), g.RecentRepos, recentDays, thousands(g.RecentMerged))})
+			"New account: %s old, %s PRs across %s in %d days, %s merged so far",
+			age(g.AccountAgeDays), thousands(g.RecentPRs), repos, recentDays, thousands(g.RecentMerged))})
 	}
 	if m.DriveBy() {
 		fs = append(fs, Flag{flagDriveBy, "Drive-by: PRs here, none merged, and no issues, comments, or reviews"})

@@ -69,7 +69,7 @@ Flags appear under the header line when something deserves a closer look. They s
 
 | Flag | When |
 |---|---|
-| Recent PRs mostly not landing | The Pattern penalty is −10 or worse and outweighs everything else in the score |
+| Recent PRs mostly not landing | The Pattern penalty is −10 or worse and outweighs everything else in the score, and fewer than half of at least 5 recently resolved PRs merged |
 | New account | Under 90 days old, with 20+ PRs across 10+ repos in the last 30 days, even if none have been closed yet |
 | Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -33,6 +34,13 @@ type fakeSource struct {
 	truncated   bool
 	stars       []int
 	err         error
+}
+
+func (f *fakeSource) SearchPage(q, order string, page int) (int, []searchItem, error) {
+	key := fmt.Sprintf("%s|%s|page%d", order, q, page)
+	f.queries = append(f.queries, key)
+	r := f.search[key]
+	return r.total, r.items, f.err
 }
 
 func (f *fakeSource) OwnedRepoStars(string) ([]int, error) {
@@ -531,6 +539,13 @@ func TestFlags(t *testing.T) {
 		{"slow review queue", Metrics{PRsOpened: 10, PRsMerged: 3, PRsOpen: 7, Threads: 5,
 			Global: Global{AccountCreated: testNow, AccountAgeDays: 1487, PRsOpened: 116, PRsMerged: 38, PRsOpen: 72,
 				MergedElsewhere: 35, RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6, RecentRepos: 8}}, nil},
+		// Copilot on #18: a big penalty with nothing resolved can't claim
+		// recent PRs "mostly didn't land." The new-account flag covers it.
+		{"200 open, nothing resolved", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
+			PRsOpened: 200, PRsOpen: 200, RecentPRs: 200, RecentRepos: 40}},
+			[]string{flagNewBurst}},
+		{"half of recent resolved merged", Metrics{Global: Global{AccountAgeDays: 3000,
+			PRsOpened: 400, PRsMerged: 20, PRsOpen: 0, RecentPRs: 300, RecentMerged: 10, RecentClosedUnmerged: 10}}, nil},
 		{"drive-by only", Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 400}}, []string{flagDriveBy}},
 		{"merged here, nothing else", Metrics{PRsOpened: 2, PRsMerged: 2, Global: Global{AccountAgeDays: 5000}}, nil},
 	}
@@ -540,6 +555,54 @@ func TestFlags(t *testing.T) {
 				t.Errorf("flags = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func repoItems(n int, repo func(i int) string) []searchItem {
+	items := make([]searchItem, n)
+	for i := range items {
+		items[i] = searchItem{Repo: repo(i)}
+	}
+	return items
+}
+
+func TestCollectReadsMorePagesToCountRepos(t *testing.T) {
+	// Copilot on #18: the newest 100 PRs all went to one repo and the older 9
+	// to nine others. The first page alone would show 1 repo.
+	const q = "is:pr author:u is:public -user:u created:>=2026-09-29"
+	src := &fakeSource{search: map[string]fakeSearch{
+		"desc|" + q:            {total: 109, items: repoItems(100, func(int) string { return "a/a" })},
+		"desc|" + q + "|page2": {total: 109, items: repoItems(9, func(i int) string { return fmt.Sprintf("r/%d", i) })},
+	}}
+	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: testNow.AddDate(0, 0, -5)}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Global.RecentRepos != 10 || m.Global.RecentSampled != 109 {
+		t.Errorf("repos = %d from %d PRs, want 10 from 109", m.Global.RecentRepos, m.Global.RecentSampled)
+	}
+	if !slices.Contains(flagCodes(m), flagNewBurst) {
+		t.Errorf("new-account flag missing: %v", flagCodes(m))
+	}
+}
+
+func TestCollectStopsPagingOnceReposAreKnown(t *testing.T) {
+	const q = "is:pr author:u is:public -user:u created:>=2026-09-29"
+	src := &fakeSource{search: map[string]fakeSearch{
+		"desc|" + q: {total: 150, items: repoItems(100, func(i int) string { return fmt.Sprintf("r/%d", i%12) })},
+	}}
+	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: testNow.AddDate(0, 0, -5)}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(src.queries, func(q string) bool { return strings.Contains(q, "|page") }) {
+		t.Errorf("read more pages after finding 12 repos: %q", src.queries)
+	}
+	// Counted from 100 of 150 PRs, so the message says it's a lower bound.
+	r := score(m, defaultWeights)
+	i := slices.IndexFunc(r.Flags, func(f Flag) bool { return f.Code == flagNewBurst })
+	if i < 0 || !strings.Contains(r.Flags[i].Message, "150 PRs across at least 12 repos") {
+		t.Errorf("flags = %+v", r.Flags)
 	}
 }
 
@@ -557,7 +620,7 @@ func TestFlagsDontChangeScore(t *testing.T) {
 
 func TestRenderFlagsInHeader(t *testing.T) {
 	m := Metrics{User: "u", Repo: "o/r", Global: Global{AccountCreated: testNow, AccountAgeDays: 6,
-		PRsOpened: 50, PRsMerged: 26, RecentPRs: 50, RecentMerged: 26, RecentRepos: 35}, Threads: 1}
+		PRsOpened: 50, PRsMerged: 26, RecentPRs: 50, RecentMerged: 26, RecentRepos: 35, RecentSampled: 50}, Threads: 1}
 	var buf bytes.Buffer
 	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
 		t.Fatal(err)
