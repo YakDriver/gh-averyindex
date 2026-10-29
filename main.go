@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,21 +33,30 @@ type options struct {
 	json    bool
 	version bool
 	user    string
+	// number is a PR or issue whose author is scored, from --pr or a URL.
+	number int
 }
 
 const usage = `Usage: gh averyindex [-R owner/repo] [--json] <user>
+       gh averyindex [-R owner/repo] [--json] --pr <number>
+       gh averyindex [--json] <pull request or issue URL>
        gh averyindex --version
 
 Summarize how helpful a GitHub user has been in a repository.
 
 Flags:
   -R, --repo owner/repo   Repository to score against (default: current repo)
+      --pr number         Score the author of this pull request or issue
       --json              Print JSON instead of a table
       --version           Print the version and exit
 `
 
-// parseArgs parses flags and the single positional user argument. Flags may
-// appear before or after the user.
+// itemURL matches a GitHub pull request or issue URL, with or without
+// anything after the number (such as /files or #issuecomment-1).
+var itemURL = regexp.MustCompile(`^https://([^/]+)/([^/]+)/([^/]+)/(?:pull|issues)/(\d+)(?:[/?#].*)?$`)
+
+// parseArgs parses flags and the single positional argument: a user, or a
+// pull request or issue URL. Flags may appear before or after it.
 func parseArgs(args []string, stderr io.Writer) (options, error) {
 	var opts options
 
@@ -56,6 +67,8 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.repo, "repo", "", "")
 	fs.BoolVar(&opts.json, "json", false, "")
 	fs.BoolVar(&opts.version, "version", false, "")
+	var pr string
+	fs.StringVar(&pr, "pr", "", "")
 
 	var positional []string
 	for {
@@ -72,15 +85,76 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	if opts.version && len(positional) == 0 {
 		return opts, nil
 	}
+	if pr != "" {
+		n, err := parseNumber(pr)
+		if err != nil {
+			return opts, fmt.Errorf("--pr %w", err)
+		}
+		opts.number = n
+		if len(positional) != 0 {
+			fs.Usage()
+			return opts, errors.New("--pr doesn't take a user; it scores the PR's author")
+		}
+		return opts, nil
+	}
+
 	if len(positional) != 1 {
 		fs.Usage()
-		return opts, errors.New("expected exactly one user")
+		return opts, errors.New("expected exactly one user, or --pr")
 	}
-	opts.user = strings.TrimPrefix(positional[0], "@")
+	arg := positional[0]
+
+	if m := itemURL.FindStringSubmatch(arg); m != nil {
+		n, err := parseNumber(m[4])
+		if err != nil {
+			return opts, fmt.Errorf("URL number %w", err)
+		}
+		// Keep the host, even github.com, so a configured default host
+		// (such as GH_HOST) can't send a github.com URL somewhere else.
+		url, err := repository.Parse(m[1] + "/" + m[2] + "/" + m[3])
+		if err != nil {
+			return opts, fmt.Errorf("invalid URL %q: %w", arg, err)
+		}
+		if opts.repo != "" {
+			r, err := repository.Parse(opts.repo)
+			if err != nil {
+				return opts, fmt.Errorf("invalid repository %q: %w", opts.repo, err)
+			}
+			if !sameRepo(r, url) {
+				return opts, fmt.Errorf("-R %s conflicts with the URL's repository %s", opts.repo, repoString(url))
+			}
+		}
+		opts.repo = repoString(url)
+		opts.number = n
+		return opts, nil
+	}
+	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
+		return opts, fmt.Errorf("%q isn't a pull request or issue URL", arg)
+	}
+
+	opts.user = strings.TrimPrefix(arg, "@")
 	if opts.user == "" {
 		return opts, errors.New("user must not be empty")
 	}
 	return opts, nil
+}
+
+// parseNumber parses a PR or issue number: a positive decimal integer.
+// Leading zeros are rejected rather than read as octal.
+func parseNumber(s string) (int, error) {
+	n, err := strconv.ParseUint(s, 10, 31)
+	if err != nil || n == 0 || s[0] == '0' {
+		return 0, fmt.Errorf("must be a positive whole number, got %q", s)
+	}
+	return int(n), nil
+}
+
+func sameRepo(a, b repository.Repository) bool {
+	return strings.EqualFold(a.Host, b.Host) && strings.EqualFold(a.Owner, b.Owner) && strings.EqualFold(a.Name, b.Name)
+}
+
+func repoString(r repository.Repository) string {
+	return r.Host + "/" + r.Owner + "/" + r.Name
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -109,7 +183,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	acct, err := gh.Account(opts.user)
+	fullName := repo.Owner + "/" + repo.Name
+	user := opts.user
+	if opts.number > 0 {
+		item, err := gh.Item(fullName, opts.number)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		user = item.Author
+		fmt.Fprintf(stderr, "Scoring %s, author of %s #%d: %s\n", user, item.kind(), opts.number, item.Title)
+	}
+
+	acct, err := gh.Account(user)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -119,7 +205,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fullName := repo.Owner + "/" + repo.Name
 	now := time.Now()
 	m, err := collect(gh, fullName, acct, now)
 	if err != nil {

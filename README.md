@@ -54,10 +54,14 @@ gh extension install YakDriver/gh-averyindex
 
 ```sh
 gh averyindex [-R owner/repo] [--json] <user>
+gh averyindex [-R owner/repo] [--json] --pr <number>
+gh averyindex [--json] <pull request or issue URL>
 gh averyindex --version
 ```
 
-Run it inside a clone to score against that repository, or pass `-R`. It uses your existing `gh` login, so it works on any repository you can read.
+Pass a username, or score the author of a pull request or issue with `--pr` or by pasting its URL. `--pr` takes issue numbers too. A URL sets the repository, so it works from anywhere.
+
+Otherwise, run it inside a clone to score against that repository, or pass `-R`. It uses your existing `gh` login, so it works on any repository you can read.
 
 `--json` output includes `schema_version`, `version`, and `generated_at` alongside the metrics, score, and flags. `schema_version` changes when a field is removed or changes meaning.
 
