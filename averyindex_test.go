@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -894,8 +895,208 @@ func TestWithRetryGivesUpLoudly(t *testing.T) {
 	}
 }
 
+func TestWithRetryRetriesServerErrors(t *testing.T) {
+	// #24: GitHub times out a slow GraphQL page with a 502. It usually works
+	// on the next try.
+	var buf bytes.Buffer
+	var slept []time.Duration
+	notices, sleep = &buf, func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { notices, sleep = os.Stderr, time.Sleep })
+
+	calls := 0
+	err := withRetry(func() error {
+		calls++
+		switch calls {
+		case 1:
+			return &api.HTTPError{StatusCode: http.StatusBadGateway, Message: "502 Bad Gateway"}
+		case 2:
+			return &api.HTTPError{StatusCode: http.StatusGatewayTimeout}
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("withRetry() = %v after %d calls, want nil after 3", err, calls)
+	}
+	if !slices.Equal(slept, []time.Duration{2 * time.Second, 8 * time.Second}) {
+		t.Errorf("slept %v, want [2s 8s]", slept)
+	}
+	if !strings.Contains(buf.String(), "server error") || !strings.Contains(buf.String(), "Not hung.") {
+		t.Errorf("notices:\n%s", buf.String())
+	}
+}
+
+func TestTransientWait(t *testing.T) {
+	for _, tt := range []struct {
+		err  error
+		want bool
+	}{
+		{&api.HTTPError{StatusCode: 502}, true},
+		{&api.HTTPError{StatusCode: 503}, true},
+		{&api.HTTPError{StatusCode: 504}, true},
+		{&api.HTTPError{StatusCode: 500}, false},
+		{&api.HTTPError{StatusCode: 404}, false},
+		{errors.New("boom"), false},
+		{nil, false},
+	} {
+		if _, ok := transientWait(tt.err, 1); ok != tt.want {
+			t.Errorf("transientWait(%v) ok = %v, want %v", tt.err, ok, tt.want)
+		}
+	}
+}
+
+func TestRenderTextPointsAtScore(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 3, PRsMerged: 3}
+	var buf bytes.Buffer
+	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(buf.String(), "\n")
+	if want := "u in o/r  ·  Contributor  ·  ➜ averyindex 24"; lines[0] != want {
+		t.Errorf("header = %q, want %q", lines[0], want)
+	}
+	// The final score row lines up with the component rows above it, even
+	// with an 11-character tier like "Contributor".
+	var row, above string
+	for i, l := range lines {
+		if strings.HasPrefix(l, "➜ averyindex") {
+			row, above = l, lines[i-1]
+		}
+	}
+	if row == "" {
+		t.Fatalf("no score row:\n%s", buf.String())
+	}
+	if utf8.RuneCountInString(row) != utf8.RuneCountInString(above) {
+		t.Errorf("score row is %d columns, row above is %d:\n%s\n%s",
+			utf8.RuneCountInString(row), utf8.RuneCountInString(above), above, row)
+	}
+}
+
+// spinnerOutput runs a spinner until it has drawn at least frames frames,
+// writes a notice, stops it, and returns everything it wrote.
+func spinnerOutput(t *testing.T, sp *spinner, frames int) string {
+	t.Helper()
+	var buf bytes.Buffer
+	sp.w = &buf
+	sp.Start(time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for {
+		sp.mu.Lock()
+		n := sp.frame
+		sp.mu.Unlock()
+		if n >= frames || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fmt.Fprintln(sp, "GitHub rate limit hit.")
+	sp.Stop()
+	sp.Stop() // safe twice
+	return buf.String()
+}
+
+func TestSpinner(t *testing.T) {
+	out := spinnerOutput(t, newSpinner(nil, arcFrames, "Scoring u…", 80), 5)
+
+	// Frames cycle in order, each redrawn in place with \r.
+	if !strings.HasPrefix(out, "\r◜ Scoring u…\r◝ Scoring u…\r◞ Scoring u…\r◟ Scoring u…\r◜ Scoring u…") {
+		t.Errorf("frames = %q", out)
+	}
+	// A notice erases the spinner row first, with spaces rather than an ANSI
+	// code, so it works on basic terminals (Copilot on #25).
+	blank := "\r" + strings.Repeat(" ", len([]rune("◜ Scoring u…"))) + "\r"
+	if !strings.Contains(out, blank+"GitHub rate limit hit.\n") {
+		t.Errorf("notice didn't erase the spinner row: %q", out)
+	}
+	if strings.Contains(out, "\033") {
+		t.Errorf("escape codes in spinner output: %q", out)
+	}
+}
+
+func TestSpinnerFitsNarrowTerminal(t *testing.T) {
+	// Copilot on #25: a line wider than the terminal wraps, and \r can't get
+	// back to the rows above.
+	label := "Scoring a-very-long-login in some-organization/some-repository-name…"
+	out := spinnerOutput(t, newSpinner(nil, arcFrames, label, 30), 2)
+	for part := range strings.SplitSeq(strings.ReplaceAll(out, "\n", "\r"), "\r") {
+		if n := utf8.RuneCountInString(part); n > 29 {
+			t.Errorf("drew %d columns on a 30-column terminal: %q", n, part)
+		}
+	}
+	if !strings.Contains(out, "◜ Scoring a-very-long-login …") {
+		t.Errorf("label not cut with an ellipsis: %q", out)
+	}
+}
+
+func TestSpinnerDefaultWidth(t *testing.T) {
+	if sp := newSpinner(nil, arcFrames, "x", 0); sp.width != defaultWidth {
+		t.Errorf("width = %d, want %d when unknown", sp.width, defaultWidth)
+	}
+}
+
+func TestSpinnerFastRunPrintsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	sp := newSpinner(&buf, arcFrames, "x", 80)
+	sp.Start(time.Hour)
+	sp.Stop()
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want nothing", buf.String())
+	}
+}
+
+func TestSpinnerFrames(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	if got := spinnerFrames(); !slices.Equal(got, arcFrames) {
+		t.Errorf("xterm frames = %v", got)
+	}
+	t.Setenv("TERM", "dumb")
+	if got := spinnerFrames(); !slices.Equal(got, asciiFrames) {
+		t.Errorf("TERM=dumb frames = %v, want ASCII", got)
+	}
+}
+
+func TestRenderTextHighlightsScore(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 3, PRsMerged: 3}
+	r := score(m, defaultWeights)
+
+	var plain, color bytes.Buffer
+	if err := renderText(&plain, m, r, testMeta); err != nil {
+		t.Fatal(err)
+	}
+	md := testMeta
+	md.Color = true
+	if err := renderText(&color, m, r, md); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(plain.String(), "\033[") {
+		t.Errorf("escape codes without color:\n%q", plain.String())
+	}
+	// The header score and the final score row are highlighted, and nothing
+	// else changes.
+	header := "u in o/r  ·  Contributor  ·  \033[1m➜ averyindex 24\033[0m\n"
+	if !strings.HasPrefix(color.String(), header) {
+		t.Errorf("header = %q", strings.SplitN(color.String(), "\n", 2)[0])
+	}
+	if got := strings.Count(color.String(), "\033[1m"); got != 2 {
+		t.Errorf("%d highlights, want 2", got)
+	}
+	stripped := regexp.MustCompile("\033\\[[0-9;]*m").ReplaceAllString(color.String(), "")
+	if stripped != plain.String() {
+		t.Errorf("color output differs from plain beyond escape codes")
+	}
+}
+
+func TestStartProgressOnlyOnTerminal(t *testing.T) {
+	var buf bytes.Buffer
+	stop := startProgress(&buf, "x")
+	stop()
+	if notices != os.Stderr || buf.Len() != 0 {
+		t.Errorf("progress started on a non-terminal writer")
+	}
+}
+
 func TestRetryNotice(t *testing.T) {
-	got := retryNotice(time.Minute, 1, time.Date(2026, 10, 29, 9, 40, 0, 0, time.UTC))
+	got := retryNotice("GitHub rate limit hit.", time.Minute, 1, time.Date(2026, 10, 29, 9, 40, 0, 0, time.UTC))
 	want := "GitHub rate limit hit. Waiting 1m0s (until 09:41:00) before retrying, attempt 1 of 3. Not hung."
 	if got != want {
 		t.Errorf("retryNotice() =\n%q\nwant\n%q", got, want)

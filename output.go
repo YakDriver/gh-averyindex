@@ -13,7 +13,8 @@ import (
 )
 
 func renderText(w io.Writer, m Metrics, r Result, md meta) error {
-	fmt.Fprintf(w, "%s in %s  ·  %s  ·  averyindex %d\n", m.User, m.Repo, r.Tier, r.Score)
+	fmt.Fprintf(w, "%s in %s  ·  %s  ·  %s\n", m.User, m.Repo, r.Tier,
+		highlight(fmt.Sprintf("%s averyindex %d", scorePointer, r.Score), md.Color))
 	for _, f := range r.Flags {
 		fmt.Fprintf(w, "  ⚠ %s\n", f.Message)
 	}
@@ -67,10 +68,28 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 		}
 		fmt.Fprintf(w, "    %s%9s  %7s\n", pad(labels[i], width-2), n, signed(c.Points))
 	}
-	fmt.Fprintf(w, "  %s%9s  %7d\n", pad("averyindex", width), r.Tier, r.Score)
+	// The pointer takes the place of the two-space indent, and a tier name
+	// wider than the count column (such as "Contributor") borrows from the
+	// label padding, so the score lines up under the points.
+	labelWidth := width - max(0, utf8.RuneCountInString(r.Tier)-9)
+	fmt.Fprintf(w, "%s\n", highlight(fmt.Sprintf("%s %s%9s  %7d", scorePointer, pad("averyindex", labelWidth), r.Tier, r.Score), md.Color))
 
 	fmt.Fprintf(w, "\naveryindex %s · %s\n", md.Version, md.GeneratedAt.UTC().Format("2006-01-02 15:04 MST"))
 	return nil
+}
+
+// scorePointer marks the score so it's easy to find, in plain text too. It's
+// a text-only arrow: one column wide, with no emoji form that some terminals
+// would substitute.
+const scorePointer = "➜"
+
+// highlight makes s bold when color is on. Bold without a color stays
+// readable on any terminal background.
+func highlight(s string, color bool) string {
+	if !color {
+		return s
+	}
+	return "\033[1m" + s + "\033[0m"
 }
 
 // pad right-pads s with spaces to width runes.

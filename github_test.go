@@ -114,6 +114,30 @@ func TestMergedPRsFetchesCommitsOnlyForMostRecentlyMerged(t *testing.T) {
 	}
 }
 
+func TestThumbsUpSamplesAndSkipsSelf(t *testing.T) {
+	pages := 0
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		pages++
+		if vars["sample"] != float64(reactionSample) {
+			t.Errorf("sample = %v, want %d", vars["sample"], reactionSample)
+		}
+		if pages == 1 {
+			return `{"data":{"search":{"issueCount":2,"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[
+				{"reactions":{"totalCount":3,"nodes":[{"user":{"login":"U"}},{"user":{"login":"a"}},{"user":null}]}}]}}}`
+		}
+		if vars["cursor"] != "c1" {
+			t.Errorf("cursor = %v, want c1", vars["cursor"])
+		}
+		return `{"data":{"search":{"issueCount":2,"pageInfo":{"hasNextPage":false},"nodes":[
+			{"reactions":{"totalCount":0,"nodes":[]}},{}]}}}`
+	}).client(t)
+
+	total, truncated, err := gh.ThumbsUp("repo:o/r author:u", "u")
+	if err != nil || total != 2 || truncated || pages != 2 {
+		t.Errorf("ThumbsUp() = %d, %v, %v after %d pages; want 2, false, nil after 2", total, truncated, err, pages)
+	}
+}
+
 func restClient(t *testing.T, status int, body string, wantPath string) *gitHub {
 	t.Helper()
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {

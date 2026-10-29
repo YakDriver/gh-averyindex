@@ -206,7 +206,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	now := time.Now()
+	stopProgress := startProgress(stderr, fmt.Sprintf("Scoring %s in %s…", acct.Login, fullName))
 	m, err := collect(gh, fullName, acct, now)
+	stopProgress()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -214,6 +216,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	result := score(m, defaultWeights)
 	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC()}
+	if f, ok := stdout.(*os.File); ok && isTerminal(f) && colorEnabled() {
+		md.Color = true
+	}
 	if opts.json {
 		err = renderJSON(stdout, m, result, md)
 	} else {
@@ -237,6 +242,25 @@ func notAPerson(acct account) string {
 		return fmt.Sprintf("%s is an organization. averyindex scores people, so there's nothing to report.", acct.Login)
 	}
 	return ""
+}
+
+// startProgress shows a spinner while data is collected, when stderr is a
+// terminal, and routes notices through it so they don't land mid-line. The
+// returned func stops it and erases its line; call it before printing the
+// report.
+func startProgress(stderr io.Writer, label string) func() {
+	f, ok := stderr.(*os.File)
+	if !ok || !isTerminal(f) {
+		return func() {}
+	}
+	sp := newSpinner(stderr, spinnerFrames(), label, terminalWidth(f))
+	old := notices
+	notices = sp
+	sp.Start(spinnerInterval)
+	return func() {
+		sp.Stop()
+		notices = old
+	}
 }
 
 func resolveRepo(flagValue string) (repository.Repository, error) {

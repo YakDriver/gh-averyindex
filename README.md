@@ -4,7 +4,7 @@ A [gh](https://cli.github.com/) extension that shows how helpful a user has been
 
 ```console
 $ gh averyindex johnthedev97
-johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  averyindex 68
+johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  ➜ averyindex 68
 
 Participation
   Issues opened      0
@@ -27,7 +27,7 @@ Score
     Code credit (3 merged × 0.63)                 1.9    +18.3
     Upvotes received                               49    +28.2
     ...
-  averyindex                                  Regular       68
+➜ averyindex                                  Regular       68
 
 averyindex v0.3.0 · 2026-10-29 17:54 UTC
 ```
@@ -88,7 +88,7 @@ Flags appear under the header line when something deserves a closer look. They s
 | Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
 
 ```console
-hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  averyindex -26
+hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  ➜ averyindex -26
   ⚠ Recent PRs mostly not landing: 3 of 26 resolved merged in 30 days
   ⚠ New account: 17 days old, 109 PRs across 23 repos in 30 days, 3 merged so far
   ⚠ Drive-by: PRs here, none merged, and no issues, comments, or reviews
@@ -103,6 +103,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 - **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control.
 - **Search returns at most 1,000 results.** Upvotes received and the repo count for recent PRs can be partial. The report says so when they are.
 - **Rework is sampled** from the 5 most recently merged PRs (picked from the 25 most recently updated, since search can't sort by merge date), and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
+- **Self-upvotes are checked among the 10 oldest 👍 on each issue or PR.** Someone who upvotes their own issue usually does it first.
 - **"First authored" ignores comments.** It's the user's oldest issue or PR in the repo.
 - **Contributors to own projects** count distinct non-bot accounts, so a user's own automation account registered as a regular user counts once.
 - **Results change over time** as PRs merge and close. Check the timestamp at the end of the report.
@@ -110,7 +111,9 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 
 ## Costs
 
-One user takes about 15 search API calls plus a few other requests, usually 10 to 15 seconds. If GitHub rate-limits the tool, it prints how long it's waiting on stderr and retries.
+One user takes about 15 search API calls plus a few other requests. That's usually 10 to 15 seconds, and up to about a minute for someone with thousands of issues and PRs in the repo. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
+
+If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 
 ## Development
 

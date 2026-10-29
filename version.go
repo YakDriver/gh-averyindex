@@ -67,4 +67,8 @@ func (b buildInfo) String() string {
 type meta struct {
 	Version     string
 	GeneratedAt time.Time
+
+	// Color highlights the score in the text report. It's only set for a
+	// terminal with color enabled, so logs and pipes get plain text.
+	Color bool
 }
