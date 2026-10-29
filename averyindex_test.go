@@ -941,12 +941,22 @@ func TestParseArgs(t *testing.T) {
 		{"pr and user", []string{"--pr", "7", "u"}, options{}, true},
 		{"negative pr", []string{"--pr", "-1"}, options{}, true},
 		{"pr URL", []string{"https://github.com/hashicorp/terraform-provider-aws/pull/50687"},
-			options{repo: "hashicorp/terraform-provider-aws", number: 50687}, false},
+			options{repo: "github.com/hashicorp/terraform-provider-aws", number: 50687}, false},
 		{"issue URL with comment anchor", []string{"https://github.com/o/r/issues/12#issuecomment-99"},
-			options{repo: "o/r", number: 12}, false},
-		{"PR files URL", []string{"https://github.com/o/r/pull/12/files"}, options{repo: "o/r", number: 12}, false},
+			options{repo: "github.com/o/r", number: 12}, false},
+		{"PR files URL", []string{"https://github.com/o/r/pull/12/files"}, options{repo: "github.com/o/r", number: 12}, false},
 		{"enterprise URL", []string{"https://ghe.example.com/o/r/pull/3"}, options{repo: "ghe.example.com/o/r", number: 3}, false},
-		{"URL with matching -R", []string{"-R", "O/R", "https://github.com/o/r/pull/3"}, options{repo: "o/r", number: 3}, false},
+		{"URL with matching -R", []string{"-R", "O/R", "https://github.com/o/r/pull/3"}, options{repo: "github.com/o/r", number: 3}, false},
+		// Copilot on #22: same repository spelled with its host.
+		{"URL with host-qualified -R", []string{"-R", "github.com/o/r", "https://github.com/o/r/pull/7"},
+			options{repo: "github.com/o/r", number: 7}, false},
+		{"URL with -R on another host", []string{"-R", "ghe.example.com/o/r", "https://github.com/o/r/pull/7"}, options{}, true},
+		// Copilot on #22: numbers are positive decimals, never octal.
+		{"pr with leading zero", []string{"--pr", "010"}, options{}, true},
+		{"pr zero with user", []string{"--pr", "0", "alice"}, options{}, true},
+		{"pr not a number", []string{"--pr", "abc"}, options{}, true},
+		{"URL number zero", []string{"https://github.com/o/r/pull/0"}, options{}, true},
+		{"URL number overflow", []string{"https://github.com/o/r/pull/99999999999999999999"}, options{}, true},
 		{"URL with other -R", []string{"-R", "x/y", "https://github.com/o/r/pull/3"}, options{}, true},
 		{"repo URL", []string{"https://github.com/o/r"}, options{}, true},
 		{"two users", []string{"a", "b"}, options{}, true},
@@ -962,6 +972,23 @@ func TestParseArgs(t *testing.T) {
 				t.Errorf("parseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseArgsURLIgnoresDefaultHost(t *testing.T) {
+	// Copilot on #22: with GH_HOST pointing at Enterprise, a github.com URL
+	// must still mean github.com.
+	t.Setenv("GH_HOST", "ghe.example.com")
+	got, err := parseArgs([]string{"https://github.com/o/r/pull/7"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := resolveRepo(got.repo)
+	if err != nil || r.Host != "github.com" {
+		t.Errorf("resolved %+v, %v; want host github.com", r, err)
+	}
+	if _, err := parseArgs([]string{"-R", "o/r", "https://github.com/o/r/pull/7"}, io.Discard); err == nil {
+		t.Error("-R o/r resolves to ghe.example.com here, so it should conflict with a github.com URL")
 	}
 }
 

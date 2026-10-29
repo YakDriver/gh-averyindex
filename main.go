@@ -67,7 +67,8 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.repo, "repo", "", "")
 	fs.BoolVar(&opts.json, "json", false, "")
 	fs.BoolVar(&opts.version, "version", false, "")
-	fs.IntVar(&opts.number, "pr", 0, "")
+	var pr string
+	fs.StringVar(&pr, "pr", "", "")
 
 	var positional []string
 	for {
@@ -84,11 +85,12 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	if opts.version && len(positional) == 0 {
 		return opts, nil
 	}
-	if opts.number < 0 {
-		return opts, errors.New("--pr must be a positive number")
-	}
-
-	if opts.number > 0 {
+	if pr != "" {
+		n, err := parseNumber(pr)
+		if err != nil {
+			return opts, fmt.Errorf("--pr %w", err)
+		}
+		opts.number = n
 		if len(positional) != 0 {
 			fs.Usage()
 			return opts, errors.New("--pr doesn't take a user; it scores the PR's author")
@@ -103,15 +105,27 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	arg := positional[0]
 
 	if m := itemURL.FindStringSubmatch(arg); m != nil {
-		host, repo := m[1], m[2]+"/"+m[3]
-		if host != "github.com" {
-			repo = host + "/" + repo
+		n, err := parseNumber(m[4])
+		if err != nil {
+			return opts, fmt.Errorf("URL number %w", err)
 		}
-		if opts.repo != "" && !strings.EqualFold(opts.repo, repo) {
-			return opts, fmt.Errorf("-R %s conflicts with the URL's repository %s", opts.repo, repo)
+		// Keep the host, even github.com, so a configured default host
+		// (such as GH_HOST) can't send a github.com URL somewhere else.
+		url, err := repository.Parse(m[1] + "/" + m[2] + "/" + m[3])
+		if err != nil {
+			return opts, fmt.Errorf("invalid URL %q: %w", arg, err)
 		}
-		opts.repo = repo
-		opts.number, _ = strconv.Atoi(m[4])
+		if opts.repo != "" {
+			r, err := repository.Parse(opts.repo)
+			if err != nil {
+				return opts, fmt.Errorf("invalid repository %q: %w", opts.repo, err)
+			}
+			if !sameRepo(r, url) {
+				return opts, fmt.Errorf("-R %s conflicts with the URL's repository %s", opts.repo, repoString(url))
+			}
+		}
+		opts.repo = repoString(url)
+		opts.number = n
 		return opts, nil
 	}
 	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
@@ -123,6 +137,24 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 		return opts, errors.New("user must not be empty")
 	}
 	return opts, nil
+}
+
+// parseNumber parses a PR or issue number: a positive decimal integer.
+// Leading zeros are rejected rather than read as octal.
+func parseNumber(s string) (int, error) {
+	n, err := strconv.ParseUint(s, 10, 31)
+	if err != nil || n == 0 || s[0] == '0' {
+		return 0, fmt.Errorf("must be a positive whole number, got %q", s)
+	}
+	return int(n), nil
+}
+
+func sameRepo(a, b repository.Repository) bool {
+	return strings.EqualFold(a.Host, b.Host) && strings.EqualFold(a.Owner, b.Owner) && strings.EqualFold(a.Name, b.Name)
+}
+
+func repoString(r repository.Repository) string {
+	return r.Host + "/" + r.Owner + "/" + r.Name
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
