@@ -56,6 +56,8 @@ type source interface {
 	// Search runs an issue/PR search and returns the total count and up to n
 	// items. order is "asc" or "desc" by creation time, or "" for best match.
 	Search(query, order string, n int) (total int, items []searchItem, err error)
+	// SearchPage returns one page (1-based) of 100 results for query.
+	SearchPage(query, order string, page int) (total int, items []searchItem, err error)
 	// MergedPRs returns the total count and up to n PRs matching query, with
 	// commits.
 	MergedPRs(query string, n int) (total int, prs []rawPR, err error)
@@ -104,9 +106,23 @@ func (g *gitHub) Account(user string) (account, error) {
 }
 
 func (g *gitHub) Search(query, order string, n int) (int, []searchItem, error) {
+	return g.search(query, order, max(1, n), 1)
+}
+
+// searchPageSize is the most results the search API returns per page.
+const searchPageSize = 100
+
+func (g *gitHub) SearchPage(query, order string, page int) (int, []searchItem, error) {
+	return g.search(query, order, searchPageSize, page)
+}
+
+func (g *gitHub) search(query, order string, n, page int) (int, []searchItem, error) {
 	v := url.Values{}
 	v.Set("q", query)
-	v.Set("per_page", strconv.Itoa(max(1, n)))
+	v.Set("per_page", strconv.Itoa(n))
+	if page > 1 {
+		v.Set("page", strconv.Itoa(page))
+	}
 	if order != "" {
 		v.Set("sort", "created")
 		v.Set("order", order)

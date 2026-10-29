@@ -42,7 +42,7 @@ Run it inside a clone to score against that repository, or pass `-R`. It uses yo
 
 ## The report
 
-**Participation** is everything besides the user's own PRs: issues opened, other people's threads they commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs they reviewed, and 👍 reactions on their issues and PRs. If someone has opened PRs and done nothing else, the report says **Drive-by**.
+**Participation** is everything besides the user's own PRs: issues opened, other people's threads they commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs they reviewed, and 👍 reactions on their issues and PRs.
 
 "First authored" is the user's oldest issue or PR. Comments aren't included because GitHub can't cheaply say when someone first commented.
 
@@ -62,6 +62,25 @@ A 1,000-line PR where a maintainer deleted 900 lines and added 100 has rework 10
 - Merge commits (such as merging `main` into the branch) are skipped.
 - Commits with no linked GitHub account count as the author's.
 - If none of the commits are linked to the PR author, the first commit's authors are treated as the contributor (usually the same person on a second account). The report shows "(commits by ...)" when that happens.
+
+## Flags
+
+Flags appear under the header line when something deserves a closer look. They state facts and don't change the score.
+
+| Flag | When |
+|---|---|
+| Recent PRs mostly not landing | The Pattern penalty is −10 or worse and outweighs everything else in the score, and fewer than half of at least 5 recently resolved PRs merged |
+| New account | Under 90 days old, with 20+ PRs across 10+ repos in the last 30 days, even if none have been closed yet |
+| Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
+
+```console
+hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  averyindex -26
+  ⚠ Recent PRs mostly not landing: 3 of 26 resolved merged in 30 days
+  ⚠ New account: 17 days old, 109 PRs across 23 repos in 30 days, 3 merged so far
+  ⚠ Drive-by: PRs here, none merged, and no issues, comments, or reviews
+```
+
+A new account can be legitimate, for example someone doing Hacktoberfest. The flag includes how many PRs merged so a maintainer can judge. `--json` lists flags in a `flags` array with a stable `code` for each.
 
 ## Elsewhere on GitHub
 
@@ -117,7 +136,7 @@ The landing rate combines long-term and recent behavior:
 | 83 PRs in 30 days, most still waiting for review, 33 of 33 merged before | −1.5 |
 | Long-time contributor with nothing in the last 30 days | 0 |
 
-Because open PRs are neutral, an account whose spray PRs are all still open isn't penalized much until they start getting closed. The rest of the report (account age, PRs across many repos, the drive-by flag) still shows the pattern.
+Because open PRs are neutral, an account whose spray PRs are all still open isn't penalized much until they start getting closed. The new-account flag below covers that case.
 
 | Tier | Score |
 |---|---|

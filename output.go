@@ -14,6 +14,9 @@ import (
 
 func renderText(w io.Writer, m Metrics, r Result) error {
 	fmt.Fprintf(w, "%s in %s  ·  %s  ·  averyindex %d\n", m.User, m.Repo, r.Tier, r.Score)
+	for _, f := range r.Flags {
+		fmt.Fprintf(w, "  ⚠ %s\n", f.Message)
+	}
 
 	fmt.Fprintln(w, "\nParticipation")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -33,9 +36,6 @@ func renderText(w io.Writer, m Metrics, r Result) error {
 	}
 	if err := tw.Flush(); err != nil {
 		return err
-	}
-	if m.DriveBy() {
-		fmt.Fprintln(w, "  Drive-by: pull requests only, no issues, comments, or reviews")
 	}
 
 	if err := renderPRs(w, m); err != nil {

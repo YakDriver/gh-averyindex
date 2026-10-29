@@ -167,9 +167,11 @@ func (m Metrics) Participation() int {
 	return m.Issues + m.Threads + m.Reviews
 }
 
-// DriveBy reports whether the user has opened PRs and done nothing else.
+// DriveBy reports whether the user has opened PRs here, none were merged, and
+// they've done nothing else here. Someone with merged PRs has already been
+// through review, so they aren't flagged.
 func (m Metrics) DriveBy() bool {
-	return m.PRsOpened > 0 && m.Participation() == 0
+	return m.PRsOpened > 0 && m.PRsMerged == 0 && m.Participation() == 0
 }
 
 // AvgCredit is the average credit across the recent merged PRs checked for
@@ -303,12 +305,28 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 		*c.dst = n
 	}
 	g.RecentPRs = total
-	g.RecentSampled = len(items)
 
 	perRepo := map[string]int{}
 	for _, it := range items {
 		perRepo[it.Repo]++
 	}
+	// The first page can miss repos when the newest PRs all went to a few of
+	// them. Keep reading until there are enough repos to decide the
+	// new-account flag or the results run out. GitHub search stops at 1,000.
+	for page := 2; len(perRepo) < burstMinRepos && len(items) < min(total, searchResultLimit); page++ {
+		_, more, err := src.SearchPage(recent, "desc", page)
+		if err != nil {
+			return err
+		}
+		if len(more) == 0 {
+			break
+		}
+		items = append(items, more...)
+		for _, it := range more {
+			perRepo[it.Repo]++
+		}
+	}
+	g.RecentSampled = len(items)
 	g.RecentRepos = len(perRepo)
 	for r, n := range perRepo {
 		// Ties go to the alphabetically first repo so output is stable.
