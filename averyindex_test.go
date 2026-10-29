@@ -37,6 +37,20 @@ type fakeSource struct {
 	err         error
 
 	thumbsQuery, thumbsAuthor string
+	batches                   int
+}
+
+func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
+	f.batches++
+	var results []searchResult
+	for _, r := range reqs {
+		total, items, err := f.Search(r.Query, r.Order, r.N)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, searchResult{Total: total, Items: items})
+	}
+	return results, nil
 }
 
 func (f *fakeSource) SearchPage(q, order string, page int) (int, []searchItem, error) {
@@ -343,6 +357,19 @@ func TestPlural(t *testing.T) {
 		if got := plural(n, "PR"); got != want {
 			t.Errorf("plural(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestCollectSendsSearchesInOneBatch(t *testing.T) {
+	src := &fakeSource{}
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if src.batches != 1 {
+		t.Errorf("%d search batches, want 1 (#26)", src.batches)
+	}
+	if slices.ContainsFunc(src.queries, func(q string) bool { return strings.Contains(q, "|page") }) {
+		t.Errorf("paged with nothing to page: %q", src.queries)
 	}
 }
 

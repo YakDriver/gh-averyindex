@@ -54,9 +54,9 @@ type rawPR struct {
 // source is the subset of GitHub data that collect needs. It exists so
 // collect can be tested without the network.
 type source interface {
-	// Search runs an issue/PR search and returns the total count and up to n
-	// items. order is "asc" or "desc" by creation time, or "" for best match.
-	Search(query, order string, n int) (total int, items []searchItem, err error)
+	// SearchMany runs several issue/PR searches together and returns a
+	// result for each request, in order.
+	SearchMany(reqs []searchReq) ([]searchResult, error)
 	// SearchPage returns one page (1-based) of 100 results for query.
 	SearchPage(query, order string, page int) (total int, items []searchItem, err error)
 	// MergedPRs returns the total count of merged PRs matching query and the
@@ -70,6 +70,20 @@ type source interface {
 	// GitHub search returns at most 1,000 results, so truncated reports
 	// whether the sum is incomplete.
 	ThumbsUp(query, author string) (total int, truncated bool, err error)
+}
+
+// searchReq is one issue/PR search. Order is "asc" or "desc" by creation
+// time, or "" for best match. N is how many items to return; 0 returns only
+// the count.
+type searchReq struct {
+	Query string
+	Order string
+	N     int
+}
+
+type searchResult struct {
+	Total int
+	Items []searchItem
 }
 
 type gitHub struct {
@@ -148,6 +162,96 @@ func (g *gitHub) Account(user string) (account, error) {
 
 func (g *gitHub) Search(query, order string, n int) (int, []searchItem, error) {
 	return g.search(query, order, max(1, n), 1)
+}
+
+// SearchMany sends every search in one GraphQL request, using an alias for
+// each. One request is faster than many REST calls, and GraphQL search
+// isn't subject to the REST search limit of 30 requests per minute (#26).
+func (g *gitHub) SearchMany(reqs []searchReq) ([]searchResult, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	var q strings.Builder
+	vars := map[string]any{}
+	q.WriteString("query(")
+	for i := range reqs {
+		if i > 0 {
+			q.WriteString(", ")
+		}
+		fmt.Fprintf(&q, "$q%d: String!", i)
+	}
+	q.WriteString(") {\n")
+	for i, r := range reqs {
+		vars[fmt.Sprintf("q%d", i)] = r.Query + graphQLSort(r.Order)
+		fmt.Fprintf(&q, "  s%d: search(query: $q%d, type: ISSUE, first: %d) { issueCount", i, i, min(r.N, searchPageSize))
+		if r.N > 0 {
+			q.WriteString(" nodes { __typename ...item }")
+		}
+		q.WriteString(" }\n")
+	}
+	q.WriteString("}\n" + itemFragments)
+
+	var resp map[string]struct {
+		IssueCount int
+		Nodes      []itemNode
+	}
+	if err := g.gqlDo(q.String(), vars, &resp); err != nil {
+		return nil, fmt.Errorf("searches: %w", err)
+	}
+	results := make([]searchResult, len(reqs))
+	for i := range reqs {
+		r := resp[fmt.Sprintf("s%d", i)]
+		results[i].Total = r.IssueCount
+		for _, n := range r.Nodes {
+			if n.Typename != "Issue" && n.Typename != "PullRequest" {
+				continue
+			}
+			results[i].Items = append(results[i].Items, n.item())
+		}
+	}
+	return results, nil
+}
+
+// graphQLSort turns an order into a search qualifier. GraphQL search has no
+// separate sort argument.
+func graphQLSort(order string) string {
+	switch order {
+	case "asc":
+		return " sort:created-asc"
+	case "desc":
+		return " sort:created-desc"
+	}
+	return ""
+}
+
+const itemFragments = `fragment item on SearchResultItem {
+  ... on Issue { number createdAt repository { nameWithOwner } author { login __typename } }
+  ... on PullRequest { number createdAt repository { nameWithOwner } author { login __typename } }
+}`
+
+type itemNode struct {
+	Typename   string `json:"__typename"`
+	Number     int
+	CreatedAt  time.Time
+	Repository struct{ NameWithOwner string }
+	Author     *struct {
+		Login    string
+		Typename string `json:"__typename"`
+	}
+}
+
+func (n itemNode) item() searchItem {
+	it := searchItem{
+		Number:    n.Number,
+		CreatedAt: n.CreatedAt,
+		IsPR:      n.Typename == "PullRequest",
+		Repo:      n.Repository.NameWithOwner,
+	}
+	if n.Author != nil {
+		it.Author = n.Author.Login
+		it.AuthorBot = n.Author.Typename == "Bot"
+	}
+	return it
 }
 
 // searchPageSize is the most results the search API returns per page.

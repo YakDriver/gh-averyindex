@@ -258,54 +258,138 @@ func globalScope(login string) string {
 	return "is:public -user:" + login
 }
 
-func collectGlobal(src source, repo string, acct account, now time.Time, g *Global) error {
+// batch collects searches so they can be sent together, and records where
+// each result goes.
+type batch struct {
+	reqs []searchReq
+	sets []func(searchResult)
+}
+
+// count adds a search whose total goes in dst.
+func (b *batch) count(dst *int, query string) {
+	b.reqs = append(b.reqs, searchReq{Query: query})
+	b.sets = append(b.sets, func(r searchResult) { *dst = r.Total })
+}
+
+// items adds a search whose total and first n items go in total and items.
+func (b *batch) items(total *int, items *[]searchItem, query, order string, n int) {
+	b.reqs = append(b.reqs, searchReq{Query: query, Order: order, N: n})
+	b.sets = append(b.sets, func(r searchResult) {
+		if total != nil {
+			*total = r.Total
+		}
+		*items = r.Items
+	})
+}
+
+func (b *batch) run(src source) error {
+	results, err := src.SearchMany(b.reqs)
+	if err != nil {
+		return err
+	}
+	if len(results) != len(b.reqs) {
+		return fmt.Errorf("got %d search results for %d searches", len(results), len(b.reqs))
+	}
+	for i, r := range results {
+		b.sets[i](r)
+	}
+	return nil
+}
+
+func collect(src source, repo string, acct account, now time.Time) (Metrics, error) {
+	user := acct.Login
+	m := Metrics{User: user, Repo: repo}
+	g := &m.Global
 	if !acct.CreatedAt.IsZero() {
 		g.AccountCreated = acct.CreatedAt
 		g.AccountAgeDays = int(now.Sub(acct.CreatedAt).Hours() / 24)
 	}
 
-	prs := fmt.Sprintf("is:pr author:%s %s", acct.Login, globalScope(acct.Login))
-	for _, c := range []struct {
-		dst   *int
-		query string
-	}{
-		{&g.PRsOpened, prs},
-		{&g.PRsMerged, prs + " is:merged"},
-		{&g.PRsOpen, prs + " is:open"},
-		{&g.MergedElsewhere, prs + " is:merged -repo:" + repo},
-	} {
-		n, _, err := src.Search(c.query, "", 1)
-		if err != nil {
-			return err
-		}
-		*c.dst = n
-	}
+	// Every search goes out in one request.
+	var b batch
 
-	if err := collectProjects(src, acct.Login, g); err != nil {
-		return err
-	}
+	// Across GitHub: public repos the user doesn't own.
+	global := fmt.Sprintf("is:pr author:%s %s", user, globalScope(user))
+	b.count(&g.PRsOpened, global)
+	b.count(&g.PRsMerged, global+" is:merged")
+	b.count(&g.PRsOpen, global+" is:open")
+	b.count(&g.MergedElsewhere, global+" is:merged -repo:"+repo)
 
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
-	recent := prs + " created:>=" + since
-	total, items, err := src.Search(recent, "desc", recentSample)
-	if err != nil {
-		return err
-	}
-	for _, c := range []struct {
-		dst   *int
-		query string
-	}{
-		{&g.RecentMerged, recent + " is:merged"},
-		{&g.RecentClosedUnmerged, recent + " is:closed is:unmerged"},
-	} {
-		n, _, err := src.Search(c.query, "", 1)
-		if err != nil {
-			return err
-		}
-		*c.dst = n
-	}
-	g.RecentPRs = total
+	recent := global + " created:>=" + since
+	var recentItems []searchItem
+	b.items(&g.RecentPRs, &recentItems, recent, "desc", recentSample)
+	b.count(&g.RecentMerged, recent+" is:merged")
+	b.count(&g.RecentClosedUnmerged, recent+" is:closed is:unmerged")
 
+	var contributorTotal int
+	var contributorItems []searchItem
+	b.items(&contributorTotal, &contributorItems,
+		fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", user, user), "desc", contributorSample)
+
+	// This repo.
+	base := "repo:" + repo
+	prs := fmt.Sprintf("%s is:pr author:%s", base, user)
+	authored := fmt.Sprintf("%s author:%s", base, user)
+	b.count(&m.PRsOpened, prs)
+	b.count(&m.Issues, fmt.Sprintf("%s is:issue author:%s", base, user))
+	// PRs the user reviewed count under Reviews, so they're left out here to
+	// avoid counting the same work twice.
+	b.count(&m.Threads, fmt.Sprintf("%s commenter:%s -author:%s -reviewed-by:%s", base, user, user, user))
+	b.count(&m.Reviews, fmt.Sprintf("%s is:pr reviewed-by:%s -author:%s", base, user, user))
+	var first, last []searchItem
+	b.items(nil, &first, authored, "asc", 1)
+	b.items(nil, &last, authored, "desc", 1)
+	b.items(&m.PRsOpen, &m.OpenPRs, prs+" is:open", "desc", openPRList)
+
+	if err := b.run(src); err != nil {
+		return m, err
+	}
+	if len(first) > 0 {
+		m.FirstAuthored = &first[0]
+	}
+	if len(last) > 0 {
+		m.LastAuthored = &last[0]
+	}
+
+	if err := countRecentRepos(src, recent, recentItems, g); err != nil {
+		return m, err
+	}
+	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
+		return m, err
+	}
+
+	var err error
+	if m.ThumbsUp, m.ThumbsUpTruncated, err = src.ThumbsUp(authored, user); err != nil {
+		return m, err
+	}
+
+	if m.PRsOpened == 0 {
+		return m, nil
+	}
+	total, raw, err := src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
+	if err != nil {
+		return m, err
+	}
+	m.PRsMerged = total
+	for _, pr := range raw {
+		rw, credit, inferred := rework(user, pr)
+		m.RecentMerged = append(m.RecentMerged, MergedPR{
+			Number:           pr.Number,
+			MergedAt:         pr.MergedAt,
+			Additions:        pr.Additions,
+			Deletions:        pr.Deletions,
+			Rework:           rw,
+			Credit:           credit,
+			CommitsBy:        inferred,
+			CommitsTruncated: pr.CommitsTruncated,
+		})
+	}
+	return m, nil
+}
+
+// countRecentRepos counts the repos the user's recent PRs went to.
+func countRecentRepos(src source, recent string, items []searchItem, g *Global) error {
 	perRepo := map[string]int{}
 	for _, it := range items {
 		perRepo[it.Repo]++
@@ -313,7 +397,7 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 	// The first page can miss repos when the newest PRs all went to a few of
 	// them. Keep reading until there are enough repos to decide the
 	// new-account flag or the results run out. GitHub search stops at 1,000.
-	for page := 2; len(perRepo) < burstMinRepos && len(items) < min(total, searchResultLimit); page++ {
+	for page := 2; len(perRepo) < burstMinRepos && len(items) < min(g.RecentPRs, searchResultLimit); page++ {
 		_, more, err := src.SearchPage(recent, "desc", page)
 		if err != nil {
 			return err
@@ -337,7 +421,8 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 	return nil
 }
 
-func collectProjects(src source, login string, g *Global) error {
+// collectProjects scores what other people do with the user's own repos.
+func collectProjects(src source, login string, contributorTotal int, contributorItems []searchItem, g *Global) error {
 	stars, err := src.OwnedRepoStars(login)
 	if err != nil {
 		return err
@@ -349,102 +434,14 @@ func collectProjects(src source, login string, g *Global) error {
 		}
 	}
 
-	q := fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", login, login)
-	total, items, err := src.Search(q, "desc", contributorSample)
-	if err != nil {
-		return err
-	}
 	people := map[string]bool{}
-	for _, it := range items {
+	for _, it := range contributorItems {
 		// A login differing only in case is the same account.
 		if it.Author != "" && !it.AuthorBot {
 			people[strings.ToLower(it.Author)] = true
 		}
 	}
 	g.Contributors = len(people)
-	g.ContributorsSample = total > len(items)
+	g.ContributorsSample = contributorTotal > len(contributorItems)
 	return nil
-}
-
-func collect(src source, repo string, acct account, now time.Time) (Metrics, error) {
-	user := acct.Login
-	m := Metrics{User: user, Repo: repo}
-	if err := collectGlobal(src, repo, acct, now, &m.Global); err != nil {
-		return m, err
-	}
-
-	base := "repo:" + repo
-	prs := fmt.Sprintf("%s is:pr author:%s", base, user)
-	authored := fmt.Sprintf("%s author:%s", base, user)
-
-	count := func(dst *int, query string) error {
-		n, _, err := src.Search(query, "", 1)
-		*dst = n
-		return err
-	}
-
-	for _, c := range []struct {
-		dst   *int
-		query string
-	}{
-		{&m.PRsOpened, prs},
-		{&m.Issues, fmt.Sprintf("%s is:issue author:%s", base, user)},
-		// PRs the user reviewed count under Reviews, so they're left out
-		// here to avoid counting the same work twice.
-		{&m.Threads, fmt.Sprintf("%s commenter:%s -author:%s -reviewed-by:%s", base, user, user, user)},
-		{&m.Reviews, fmt.Sprintf("%s is:pr reviewed-by:%s -author:%s", base, user, user)},
-	} {
-		if err := count(c.dst, c.query); err != nil {
-			return m, err
-		}
-	}
-
-	for _, f := range []struct {
-		dst   **searchItem
-		order string
-	}{
-		{&m.FirstAuthored, "asc"},
-		{&m.LastAuthored, "desc"},
-	} {
-		_, items, err := src.Search(authored, f.order, 1)
-		if err != nil {
-			return m, err
-		}
-		if len(items) > 0 {
-			*f.dst = &items[0]
-		}
-	}
-
-	var err error
-	if m.ThumbsUp, m.ThumbsUpTruncated, err = src.ThumbsUp(authored, user); err != nil {
-		return m, err
-	}
-
-	if m.PRsOpened == 0 {
-		return m, nil
-	}
-
-	if m.PRsOpen, m.OpenPRs, err = src.Search(prs+" is:open", "desc", openPRList); err != nil {
-		return m, err
-	}
-
-	total, raw, err := src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
-	if err != nil {
-		return m, err
-	}
-	m.PRsMerged = total
-	for _, pr := range raw {
-		rw, credit, inferred := rework(user, pr)
-		m.RecentMerged = append(m.RecentMerged, MergedPR{
-			Number:           pr.Number,
-			MergedAt:         pr.MergedAt,
-			Additions:        pr.Additions,
-			Deletions:        pr.Deletions,
-			Rework:           rw,
-			Credit:           credit,
-			CommitsBy:        inferred,
-			CommitsTruncated: pr.CommitsTruncated,
-		})
-	}
-	return m, nil
 }
