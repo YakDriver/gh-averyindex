@@ -98,6 +98,43 @@ type account struct {
 	Type string `json:"type"`
 }
 
+// item is the PR or issue whose author is being scored.
+type item struct {
+	Author string
+	Title  string
+	IsPR   bool
+}
+
+func (i item) kind() string {
+	if i.IsPR {
+		return "PR"
+	}
+	return "issue"
+}
+
+// Item looks up a PR or issue by number. GitHub's issues API returns both.
+func (g *gitHub) Item(repo string, number int) (item, error) {
+	var resp struct {
+		Title string `json:"title"`
+		User  *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		PullRequest json.RawMessage `json:"pull_request"`
+	}
+	err := g.get(fmt.Sprintf("repos/%s/issues/%d", repo, number), &resp)
+	if httpErr, ok := errors.AsType[*api.HTTPError](err); ok && httpErr.StatusCode == http.StatusNotFound {
+		return item{}, fmt.Errorf("no pull request or issue #%d in %s", number, repo)
+	}
+	if err != nil {
+		return item{}, err
+	}
+	// Deleted accounts show up as the placeholder user "ghost".
+	if resp.User == nil || resp.User.Login == "" || resp.User.Login == "ghost" {
+		return item{}, fmt.Errorf("#%d in %s has no author (deleted account?)", number, repo)
+	}
+	return item{Author: resp.User.Login, Title: resp.Title, IsPR: len(resp.PullRequest) > 0}, nil
+}
+
 // Account looks up user, or returns an error if it doesn't exist.
 func (g *gitHub) Account(user string) (account, error) {
 	var resp account

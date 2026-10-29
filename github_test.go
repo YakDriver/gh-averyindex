@@ -114,6 +114,57 @@ func TestMergedPRsFetchesCommitsOnlyForMostRecentlyMerged(t *testing.T) {
 	}
 }
 
+func restClient(t *testing.T, status int, body string, wantPath string) *gitHub {
+	t.Helper()
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != wantPath {
+			t.Errorf("path = %s, want %s", req.URL.Path, wantPath)
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	rest, err := api.NewRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "test", Transport: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &gitHub{rest: rest}
+}
+
+func TestItem(t *testing.T) {
+	const path = "/repos/o/r/issues/7"
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		want    item
+		wantErr string
+	}{
+		{"pull request", 200, `{"title":"Fix it","user":{"login":"alice"},"pull_request":{"url":"x"}}`,
+			item{Author: "alice", Title: "Fix it", IsPR: true}, ""},
+		{"issue", 200, `{"title":"Broken","user":{"login":"bob"}}`, item{Author: "bob", Title: "Broken"}, ""},
+		{"deleted author", 200, `{"title":"Old","user":{"login":"ghost"}}`, item{}, "no author"},
+		{"not found", 404, `{"message":"Not Found"}`, item{}, "no pull request or issue #7 in o/r"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := restClient(t, tt.status, tt.body, path).Item("o/r", 7)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Item() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Errorf("Item() = %+v, %v; want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestMergedPRsNoneMerged(t *testing.T) {
 	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
 		if !strings.Contains(query, "search(") {
