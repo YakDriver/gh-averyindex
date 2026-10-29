@@ -156,7 +156,7 @@ func TestSearchManyOneRequest(t *testing.T) {
 		if !strings.Contains(query, "s0: search(query: $q0, type: ISSUE, first: 0) { issueCount }") {
 			t.Errorf("count search should ask for no nodes:\n%s", query)
 		}
-		if !strings.Contains(query, "s2: search(query: $q2, type: ISSUE, first: 100) { issueCount nodes") {
+		if !strings.Contains(query, "s2: search(query: $q2, type: ISSUE, first: 100) { issueCount pageInfo { hasNextPage endCursor } nodes") {
 			t.Errorf("item search should be capped at 100 per page:\n%s", query)
 		}
 		// Aliases come back in a different order than they were sent.
@@ -197,6 +197,38 @@ func TestSearchManyOneRequest(t *testing.T) {
 	}
 	if results[2].Total != 250 || !slices.Equal(results[2].Items, want) {
 		t.Errorf("items = %+v (total %d)", results[2].Items, results[2].Total)
+	}
+}
+
+func TestSearchManyCountsOnly(t *testing.T) {
+	// Copilot on #27: GraphQL rejects a fragment that isn't used.
+	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
+		if strings.Contains(query, "fragment") || strings.Contains(query, "pageInfo") {
+			t.Errorf("count-only batch includes item fields:\n%s", query)
+		}
+		return `{"data":{"s0":{"issueCount":4},"s1":{"issueCount":0}}}`
+	}).client(t)
+	results, err := gh.SearchMany([]searchReq{{Query: "a"}, {Query: "b"}})
+	if err != nil || len(results) != 2 || results[0].Total != 4 || results[1].Total != 0 {
+		t.Errorf("SearchMany() = %+v, %v", results, err)
+	}
+}
+
+func TestSearchNext(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		if vars["q"] != "is:pr author:u sort:created-desc" || vars["cursor"] != "c1" {
+			t.Errorf("vars = %v", vars)
+		}
+		if !strings.Contains(query, "after: $cursor") || !strings.Contains(query, "fragment item") {
+			t.Errorf("query:\n%s", query)
+		}
+		return `{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":false,"endCursor":"c2"},
+			"nodes":[{"__typename":"PullRequest","number":3,"createdAt":"2026-10-01T00:00:00Z",
+			"repository":{"nameWithOwner":"x/y"},"author":{"login":"u","__typename":"User"}}]}}}`
+	}).client(t)
+	r, err := gh.SearchNext("is:pr author:u", "desc", "c1")
+	if err != nil || r.Total != 150 || r.HasNext || len(r.Items) != 1 || r.Items[0].Repo != "x/y" {
+		t.Errorf("SearchNext() = %+v, %v", r, err)
 	}
 }
 

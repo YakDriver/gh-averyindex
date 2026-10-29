@@ -282,6 +282,12 @@ func (b *batch) items(total *int, items *[]searchItem, query, order string, n in
 	})
 }
 
+// result adds a search whose whole result, including its cursor, goes in dst.
+func (b *batch) result(dst *searchResult, query, order string, n int) {
+	b.reqs = append(b.reqs, searchReq{Query: query, Order: order, N: n})
+	b.sets = append(b.sets, func(r searchResult) { *dst = r })
+}
+
 func (b *batch) run(src source) error {
 	results, err := src.SearchMany(b.reqs)
 	if err != nil {
@@ -317,8 +323,8 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
 	recent := global + " created:>=" + since
-	var recentItems []searchItem
-	b.items(&g.RecentPRs, &recentItems, recent, "desc", recentSample)
+	var recentFirst searchResult
+	b.result(&recentFirst, recent, "desc", recentSample)
 	b.count(&g.RecentMerged, recent+" is:merged")
 	b.count(&g.RecentClosedUnmerged, recent+" is:closed is:unmerged")
 
@@ -352,7 +358,8 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 		m.LastAuthored = &last[0]
 	}
 
-	if err := countRecentRepos(src, recent, recentItems, g); err != nil {
+	g.RecentPRs = recentFirst.Total
+	if err := countRecentRepos(src, recent, recentFirst, g); err != nil {
 		return m, err
 	}
 	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
@@ -388,8 +395,10 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	return m, nil
 }
 
-// countRecentRepos counts the repos the user's recent PRs went to.
-func countRecentRepos(src source, recent string, items []searchItem, g *Global) error {
+// countRecentRepos counts the repos the user's recent PRs went to, starting
+// from the first page of results.
+func countRecentRepos(src source, recent string, page searchResult, g *Global) error {
+	items := page.Items
 	perRepo := map[string]int{}
 	for _, it := range items {
 		perRepo[it.Repo]++
@@ -397,16 +406,17 @@ func countRecentRepos(src source, recent string, items []searchItem, g *Global) 
 	// The first page can miss repos when the newest PRs all went to a few of
 	// them. Keep reading until there are enough repos to decide the
 	// new-account flag or the results run out. GitHub search stops at 1,000.
-	for page := 2; len(perRepo) < burstMinRepos && len(items) < min(g.RecentPRs, searchResultLimit); page++ {
-		_, more, err := src.SearchPage(recent, "desc", page)
+	for len(perRepo) < burstMinRepos && page.HasNext && len(items) < searchResultLimit {
+		next, err := src.SearchNext(recent, "desc", page.EndCursor)
 		if err != nil {
 			return err
 		}
-		if len(more) == 0 {
+		if len(next.Items) == 0 {
 			break
 		}
-		items = append(items, more...)
-		for _, it := range more {
+		page = next
+		items = append(items, next.Items...)
+		for _, it := range next.Items {
 			perRepo[it.Repo]++
 		}
 	}

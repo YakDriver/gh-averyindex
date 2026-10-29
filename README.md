@@ -111,7 +111,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 
 ## Costs
 
-All of a user's searches go to GitHub in one GraphQL request, plus a few smaller requests for reactions, rework, and the user's own repos. A run usually takes about 5 seconds, and longer for someone with thousands of issues and PRs in the repo. It costs a few GraphQL points out of 5,000 per hour, and doesn't use the REST search limit of 30 requests per minute, so scoring several people in a row doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
+All of a user's searches go to GitHub in one GraphQL request, plus a few smaller requests for reactions, rework, and the user's own repos. A run usually takes about 5 seconds, and longer for someone with thousands of issues and PRs in the repo. It costs a few GraphQL points out of 5,000 per hour. Searches, including any extra pages, all go through GraphQL rather than the REST search API and its limit of 30 requests per minute, so scoring several people in a row normally doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
 
 If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 
