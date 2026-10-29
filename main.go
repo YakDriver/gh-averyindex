@@ -114,6 +114,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	if msg := notAPerson(acct); msg != "" {
+		fmt.Fprintln(stderr, msg)
+		return 1
+	}
 
 	fullName := repo.Owner + "/" + repo.Name
 	now := time.Now()
@@ -135,6 +139,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// notAPerson explains why acct can't be scored, or returns "" if it can.
+// averyindex is for deciding whether to vouch for a person, and search
+// handles bots and organizations differently, so their numbers would mislead.
+func notAPerson(acct account) string {
+	switch acct.Type {
+	case "Bot":
+		return fmt.Sprintf("%s is a bot account. averyindex scores people, so there's nothing to report.", acct.Login)
+	case "Organization":
+		return fmt.Sprintf("%s is an organization. averyindex scores people, so there's nothing to report.", acct.Login)
+	}
+	return ""
 }
 
 func resolveRepo(flagValue string) (repository.Repository, error) {

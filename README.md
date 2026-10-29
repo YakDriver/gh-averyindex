@@ -98,12 +98,11 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 - **Private repositories are excluded** from everything outside the scored repo.
 - **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control.
 - **Search returns at most 1,000 results.** Upvotes received and the repo count for recent PRs can be partial. The report says so when they are.
-- **Rework is sampled** from 5 merged PRs, and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
+- **Rework is sampled** from the 5 most recently merged PRs (picked from the 25 most recently updated, since search can't sort by merge date), and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
 - **"First authored" ignores comments.** It's the user's oldest issue or PR in the repo.
 - **Contributors to own projects** count distinct non-bot accounts, so a user's own automation account registered as a regular user counts once.
 - **Results change over time** as PRs merge and close. Check the timestamp at the end of the report.
-
-Known gaps being worked on: [#6](https://github.com/YakDriver/gh-averyindex/issues/6) (the rework sample is the most recently opened merged PRs, not the most recently merged), [#8](https://github.com/YakDriver/gh-averyindex/issues/8) (bot accounts aren't searched correctly).
+- **Bots and organizations aren't scored.** The tool says so and exits.
 
 ## Costs
 
