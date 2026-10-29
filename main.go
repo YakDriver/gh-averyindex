@@ -206,7 +206,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	now := time.Now()
+	stopProgress := startProgress(stderr)
 	m, err := collect(gh, fullName, acct, now)
+	stopProgress()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -237,6 +239,24 @@ func notAPerson(acct account) string {
 		return fmt.Sprintf("%s is an organization. averyindex scores people, so there's nothing to report.", acct.Login)
 	}
 	return ""
+}
+
+// startProgress prints a dot every few seconds while data is collected, when
+// stderr is a terminal, and routes notices through it so they start on their
+// own line. The returned func stops it; call it before printing the report.
+func startProgress(stderr io.Writer) func() {
+	f, ok := stderr.(*os.File)
+	if !ok || !isTerminal(f) {
+		return func() {}
+	}
+	p := newProgress(stderr)
+	old := notices
+	notices = p
+	p.Start(progressInterval)
+	return func() {
+		p.Stop()
+		notices = old
+	}
 }
 
 func resolveRepo(flagValue string) (repository.Repository, error) {

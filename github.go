@@ -225,17 +225,23 @@ func (g *gitHub) gqlDo(query string, vars map[string]any, v any) error {
 	return withRetry(func() error { return g.gql.Do(query, vars, v) })
 }
 
-// withRetry runs call, waiting and retrying when GitHub rate limits it. Every
-// wait is announced so a long pause doesn't look like a hang.
+// withRetry runs call, waiting and retrying when GitHub rate limits it or
+// returns a transient server error. Every wait is announced so a long pause
+// doesn't look like a hang.
 func withRetry(call func() error) error {
 	for attempt := 1; ; attempt++ {
 		err := call()
 		wait, ok := rateLimitWait(err, time.Now())
+		reason := "GitHub rate limit hit."
+		if !ok {
+			wait, ok = transientWait(err, attempt)
+			reason = "GitHub returned a server error (a slow query can time out)."
+		}
 		if !ok {
 			return err
 		}
 		if attempt > maxRetries {
-			fmt.Fprintf(notices, "GitHub rate limit: still limited after %d retries, giving up. Try again in a few minutes.\n", maxRetries)
+			fmt.Fprintf(notices, "GitHub: still failing after %d retries, giving up. Try again in a few minutes.\n", maxRetries)
 			return err
 		}
 		if wait > maxRetryWait {
@@ -243,14 +249,29 @@ func withRetry(call func() error) error {
 				wait.Round(time.Second), maxRetryWait)
 			return err
 		}
-		fmt.Fprintln(notices, retryNotice(wait, attempt, time.Now()))
+		fmt.Fprintln(notices, retryNotice(reason, wait, attempt, time.Now()))
 		sleep(wait)
 	}
 }
 
-func retryNotice(wait time.Duration, attempt int, now time.Time) string {
-	return fmt.Sprintf("GitHub rate limit hit. Waiting %s (until %s) before retrying, attempt %d of %d. Not hung.",
-		wait.Round(time.Second), now.Add(wait).Format("15:04:05"), attempt, maxRetries)
+func retryNotice(reason string, wait time.Duration, attempt int, now time.Time) string {
+	return fmt.Sprintf("%s Waiting %s (until %s) before retrying, attempt %d of %d. Not hung.",
+		reason, wait.Round(time.Second), now.Add(wait).Format("15:04:05"), attempt, maxRetries)
+}
+
+// transientWait reports how long to wait before retrying a 502, 503, or 504.
+// GitHub returns these when a request times out or a server is briefly
+// unavailable, and they usually succeed on retry.
+func transientWait(err error, attempt int) (time.Duration, bool) {
+	h, ok := errors.AsType[*api.HTTPError](err)
+	if !ok {
+		return 0, false
+	}
+	switch h.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return time.Duration(attempt*attempt) * 2 * time.Second, true
+	}
+	return 0, false
 }
 
 // rateLimitWait reports how long to wait before retrying err, if err is a
@@ -467,17 +488,19 @@ func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
 
 // reactionSample is how many 👍 reactions per item are checked for the
 // author's own. An author who upvotes their own issue usually does it first,
-// so checking the oldest is enough.
-const reactionSample = 100
+// so checking the oldest few is enough. Fetching more made each page slow
+// enough for GitHub to time it out with a 502 on users with thousands of
+// items (#24).
+const reactionSample = 10
 
 const thumbsUpQuery = `
-query($q: String!, $cursor: String) {
+query($q: String!, $cursor: String, $sample: Int!) {
   search(query: $q, type: ISSUE, first: 100, after: $cursor) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
-      ... on Issue { reactions(content: THUMBS_UP, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
-      ... on PullRequest { reactions(content: THUMBS_UP, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
+      ... on Issue { reactions(content: THUMBS_UP, first: $sample, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
+      ... on PullRequest { reactions(content: THUMBS_UP, first: $sample, orderBy: {field: CREATED_AT, direction: ASC}) { ...thumbs } }
     }
   }
 }
@@ -522,7 +545,7 @@ func (g *gitHub) ThumbsUp(query, author string) (int, bool, error) {
 				}
 			}
 		}
-		vars := map[string]any{"q": query, "cursor": cursor}
+		vars := map[string]any{"q": query, "cursor": cursor, "sample": reactionSample}
 		if err := g.gqlDo(thumbsUpQuery, vars, &resp); err != nil {
 			return 0, false, fmt.Errorf("reactions for %q: %w", query, err)
 		}

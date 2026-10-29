@@ -894,8 +894,106 @@ func TestWithRetryGivesUpLoudly(t *testing.T) {
 	}
 }
 
+func TestWithRetryRetriesServerErrors(t *testing.T) {
+	// #24: GitHub times out a slow GraphQL page with a 502. It usually works
+	// on the next try.
+	var buf bytes.Buffer
+	var slept []time.Duration
+	notices, sleep = &buf, func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { notices, sleep = os.Stderr, time.Sleep })
+
+	calls := 0
+	err := withRetry(func() error {
+		calls++
+		switch calls {
+		case 1:
+			return &api.HTTPError{StatusCode: http.StatusBadGateway, Message: "502 Bad Gateway"}
+		case 2:
+			return &api.HTTPError{StatusCode: http.StatusGatewayTimeout}
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("withRetry() = %v after %d calls, want nil after 3", err, calls)
+	}
+	if !slices.Equal(slept, []time.Duration{2 * time.Second, 8 * time.Second}) {
+		t.Errorf("slept %v, want [2s 8s]", slept)
+	}
+	if !strings.Contains(buf.String(), "server error") || !strings.Contains(buf.String(), "Not hung.") {
+		t.Errorf("notices:\n%s", buf.String())
+	}
+}
+
+func TestTransientWait(t *testing.T) {
+	for _, tt := range []struct {
+		err  error
+		want bool
+	}{
+		{&api.HTTPError{StatusCode: 502}, true},
+		{&api.HTTPError{StatusCode: 503}, true},
+		{&api.HTTPError{StatusCode: 504}, true},
+		{&api.HTTPError{StatusCode: 500}, false},
+		{&api.HTTPError{StatusCode: 404}, false},
+		{errors.New("boom"), false},
+		{nil, false},
+	} {
+		if _, ok := transientWait(tt.err, 1); ok != tt.want {
+			t.Errorf("transientWait(%v) ok = %v, want %v", tt.err, ok, tt.want)
+		}
+	}
+}
+
+func TestProgress(t *testing.T) {
+	var buf bytes.Buffer
+	p := newProgress(&buf)
+	p.Start(time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for {
+		p.mu.Lock()
+		n := strings.Count(buf.String(), ".")
+		p.mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A notice starts on its own line instead of after the dots.
+	fmt.Fprintln(p, "GitHub rate limit hit.")
+	p.Stop()
+
+	out := buf.String()
+	if !regexp.MustCompile(`^\.{2,}\nGitHub rate limit hit\.\n\.*\n?$`).MatchString(out) {
+		t.Errorf("progress output = %q", out)
+	}
+	// Stop ends the dot line so the report starts cleanly, and it's safe to
+	// call twice.
+	p.Stop()
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Errorf("output doesn't end with a newline: %q", buf.String())
+	}
+}
+
+func TestProgressNoDotsNoNewline(t *testing.T) {
+	var buf bytes.Buffer
+	p := newProgress(&buf)
+	p.Start(time.Hour)
+	p.Stop()
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want nothing for a fast run", buf.String())
+	}
+}
+
+func TestStartProgressOnlyOnTerminal(t *testing.T) {
+	var buf bytes.Buffer
+	stop := startProgress(&buf)
+	stop()
+	if notices != os.Stderr || buf.Len() != 0 {
+		t.Errorf("progress started on a non-terminal writer")
+	}
+}
+
 func TestRetryNotice(t *testing.T) {
-	got := retryNotice(time.Minute, 1, time.Date(2026, 10, 29, 9, 40, 0, 0, time.UTC))
+	got := retryNotice("GitHub rate limit hit.", time.Minute, 1, time.Date(2026, 10, 29, 9, 40, 0, 0, time.UTC))
 	want := "GitHub rate limit hit. Waiting 1m0s (until 09:41:00) before retrying, attempt 1 of 3. Not hung."
 	if got != want {
 		t.Errorf("retryNotice() =\n%q\nwant\n%q", got, want)
