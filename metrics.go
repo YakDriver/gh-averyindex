@@ -16,9 +16,18 @@ const (
 	recentDays = 30
 	// recentSample is how many recent PRs are examined to count repos.
 	recentSample = 100
+	// minProjectStars is the fewest stars a user's own repo needs before its
+	// stars count. It filters out a self-star plus a friend on every repo.
+	minProjectStars = 3
+	// contributorSample is how many merged PRs in the user's own repos are
+	// examined to count distinct contributors.
+	contributorSample = 100
 )
 
-// Global is the user's PR activity across all of GitHub, not just this repo.
+// Global is the user's PR activity across GitHub. It covers public
+// repositories the user doesn't own: anyone can open and merge PRs in their
+// own repos, and private repos would make the result depend on who runs the
+// tool.
 type Global struct {
 	AccountCreated time.Time `json:"account_created,omitzero"`
 	AccountAgeDays int       `json:"account_age_days"`
@@ -26,6 +35,19 @@ type Global struct {
 	PRsOpened int `json:"prs_opened"`
 	PRsMerged int `json:"prs_merged"`
 	PRsOpen   int `json:"prs_open"`
+
+	// MergedElsewhere is PRs merged in those repositories, excluding the one
+	// being scored.
+	MergedElsewhere int `json:"merged_elsewhere"`
+
+	// Projects maintained: what other people did with the user's own public
+	// repositories. Self-merged PRs in those repos aren't counted because
+	// nobody else judged them, but other people starring and contributing to
+	// the projects is.
+	ProjectStars       int  `json:"project_stars"`
+	ProjectsStarred    int  `json:"projects_starred"`
+	Contributors       int  `json:"contributors"`
+	ContributorsSample bool `json:"contributors_sampled,omitempty"`
 
 	// RecentPRs is PRs opened anywhere in the last recentDays days.
 	RecentPRs int `json:"recent_prs"`
@@ -108,11 +130,6 @@ type Metrics struct {
 	OpenPRs      []searchItem `json:"open_prs,omitempty"`
 
 	Global Global `json:"global"`
-}
-
-// MergedElsewhere is PRs merged in repositories other than this one.
-func (m Metrics) MergedElsewhere() int {
-	return max(0, m.Global.PRsMerged-m.PRsMerged)
 }
 
 // PRsClosedUnmerged is PRs the user opened that were closed without merging.
@@ -211,13 +228,18 @@ func ownedBy(owners []string, c rawCommit) bool {
 	return false
 }
 
-func collectGlobal(src source, acct account, now time.Time, g *Global) error {
+// globalScope limits a search to public repositories the user doesn't own.
+func globalScope(login string) string {
+	return "is:public -user:" + login
+}
+
+func collectGlobal(src source, repo string, acct account, now time.Time, g *Global) error {
 	if !acct.CreatedAt.IsZero() {
 		g.AccountCreated = acct.CreatedAt
 		g.AccountAgeDays = int(now.Sub(acct.CreatedAt).Hours() / 24)
 	}
 
-	prs := "is:pr author:" + acct.Login
+	prs := fmt.Sprintf("is:pr author:%s %s", acct.Login, globalScope(acct.Login))
 	for _, c := range []struct {
 		dst   *int
 		query string
@@ -225,12 +247,17 @@ func collectGlobal(src source, acct account, now time.Time, g *Global) error {
 		{&g.PRsOpened, prs},
 		{&g.PRsMerged, prs + " is:merged"},
 		{&g.PRsOpen, prs + " is:open"},
+		{&g.MergedElsewhere, prs + " is:merged -repo:" + repo},
 	} {
 		n, _, err := src.Search(c.query, "", 1)
 		if err != nil {
 			return err
 		}
 		*c.dst = n
+	}
+
+	if err := collectProjects(src, acct.Login, g); err != nil {
+		return err
 	}
 
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
@@ -255,10 +282,39 @@ func collectGlobal(src source, acct account, now time.Time, g *Global) error {
 	return nil
 }
 
+func collectProjects(src source, login string, g *Global) error {
+	stars, err := src.OwnedRepoStars(login)
+	if err != nil {
+		return err
+	}
+	for _, n := range stars {
+		if n >= minProjectStars {
+			g.ProjectStars += n
+			g.ProjectsStarred++
+		}
+	}
+
+	q := fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", login, login)
+	total, items, err := src.Search(q, "desc", contributorSample)
+	if err != nil {
+		return err
+	}
+	people := map[string]bool{}
+	for _, it := range items {
+		// A login differing only in case is the same account.
+		if it.Author != "" && !it.AuthorBot {
+			people[strings.ToLower(it.Author)] = true
+		}
+	}
+	g.Contributors = len(people)
+	g.ContributorsSample = total > len(items)
+	return nil
+}
+
 func collect(src source, repo string, acct account, now time.Time) (Metrics, error) {
 	user := acct.Login
 	m := Metrics{User: user, Repo: repo}
-	if err := collectGlobal(src, acct, now, &m.Global); err != nil {
+	if err := collectGlobal(src, repo, acct, now, &m.Global); err != nil {
 		return m, err
 	}
 

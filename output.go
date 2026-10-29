@@ -77,7 +77,7 @@ func pad(s string, width int) string {
 }
 
 func renderGlobal(w io.Writer, g Global) {
-	fmt.Fprintln(w, "\nElsewhere on GitHub")
+	fmt.Fprintln(w, "\nElsewhere on GitHub (public repos the user doesn't own)")
 	created := "unknown"
 	if !g.AccountCreated.IsZero() {
 		created = fmt.Sprintf("%s (%s ago)", date(g.AccountCreated), age(g.AccountAgeDays))
@@ -100,11 +100,21 @@ func renderGlobal(w io.Writer, g Global) {
 		{"PRs opened", fmt.Sprintf("%s · %s merged · %s open · %s closed unmerged",
 			thousands(g.PRsOpened), thousands(g.PRsMerged), thousands(g.PRsOpen), thousands(g.ClosedUnmerged()))},
 		{"Merge rate", rate},
+		{"Own projects", projects(g)},
 		{fmt.Sprintf("Last %d days", recentDays), recent},
 	} {
 		fmt.Fprintf(tw, "  %s\t%s\n", row[0], row[1])
 	}
 	tw.Flush()
+}
+
+func projects(g Global) string {
+	contributors := fmt.Sprintf("%d contributors", g.Contributors)
+	if g.ContributorsSample {
+		contributors += fmt.Sprintf(" (from the newest %d merged PRs)", contributorSample)
+	}
+	return fmt.Sprintf("%s stars on %d repos with %d+ · %s",
+		thousands(g.ProjectStars), g.ProjectsStarred, minProjectStars, contributors)
 }
 
 // count formats whole numbers with separators and fractions to one place.
