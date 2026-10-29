@@ -31,24 +31,24 @@ const (
 // opinions about until the ranking matches your judgment.
 type Weights struct {
 	// Here.
-	Code           float64 `json:"code"`
-	ThumbsUp       float64 `json:"thumbs_up"`
-	Reviews        float64 `json:"reviews"`
-	Threads        float64 `json:"threads"`
-	Issues         float64 `json:"issues"`
-	ClosedUnmerged float64 `json:"closed_unmerged"`
+	Code           float64
+	ThumbsUp       float64
+	Reviews        float64
+	Threads        float64
+	Issues         float64
+	ClosedUnmerged float64
 
 	// Elsewhere. AccountAge is per doubling of account age in months.
-	AccountAge      float64 `json:"account_age"`
-	MergedElsewhere float64 `json:"merged_elsewhere"`
-	ProjectStars    float64 `json:"project_stars"`
-	Contributors    float64 `json:"contributors"`
-	ElsewhereCap    float64 `json:"elsewhere_cap"`
+	AccountAge      float64
+	MergedElsewhere float64
+	ProjectStars    float64
+	Contributors    float64
+	ElsewhereCap    float64
 
 	// Pattern. NotLanding is multiplied by log2(1 + PRs opened in the last
 	// 30 days) and by (1 - landing rate)², so it only bites when volume is
 	// high and PRs aren't landing. See Global.LandingRate.
-	NotLanding float64 `json:"not_landing"`
+	NotLanding float64
 }
 
 var defaultWeights = Weights{
@@ -91,11 +91,11 @@ func tierFor(score int) string {
 
 // Component is one line of the score breakdown.
 type Component struct {
-	Group  string  `json:"group"`
-	Label  string  `json:"label"`
-	Detail string  `json:"detail,omitempty"`
-	Count  float64 `json:"count"`
-	Points float64 `json:"points"`
+	Group  string `json:"group"`
+	Label  string `json:"label"`
+	Detail string `json:"detail,omitempty"`
+	Count  float64
+	Points float64
 }
 
 // Result is the score and the components that produced it.

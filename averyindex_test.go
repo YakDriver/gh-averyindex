@@ -10,7 +10,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -69,7 +68,7 @@ func (f *fakeSource) ThumbsUp(string) (int, bool, error) {
 
 var testNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
-var testMeta = meta{Version: "v9.9.9", GeneratedAt: testNow, Weights: defaultWeights}
+var testMeta = meta{Version: "v9.9.9", GeneratedAt: testNow}
 
 func day(s string) time.Time {
 	t, err := time.Parse(time.DateOnly, s)
@@ -707,24 +706,17 @@ func TestRenderJSONMeta(t *testing.T) {
 	if err := renderJSON(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
-	var got struct {
-		SchemaVersion int                `json:"schema_version"`
-		Version       string             `json:"version"`
-		GeneratedAt   time.Time          `json:"generated_at"`
-		Weights       map[string]float64 `json:"weights"`
-	}
+	var got map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.SchemaVersion != schemaVersion || got.Version != "v9.9.9" || !got.GeneratedAt.Equal(testNow) {
-		t.Errorf("meta = %+v", got)
+	if got["schema_version"] != float64(schemaVersion) || got["version"] != "v9.9.9" ||
+		got["generated_at"] != "2026-10-29T12:00:00Z" {
+		t.Errorf("meta = %v %v %v", got["schema_version"], got["version"], got["generated_at"])
 	}
-	// Every weight is recorded, so an old score can be recomputed.
-	if len(got.Weights) != reflect.TypeFor[Weights]().NumField() {
-		t.Errorf("weights has %d fields, Weights has %d: %v", len(got.Weights), reflect.TypeFor[Weights]().NumField(), got.Weights)
-	}
-	if got.Weights["code"] != defaultWeights.Code || got.Weights["not_landing"] != defaultWeights.NotLanding {
-		t.Errorf("weights = %v", got.Weights)
+	// The version pins the weights, so they aren't repeated in the output.
+	if _, ok := got["weights"]; ok {
+		t.Error("weights should not be in JSON output")
 	}
 }
 

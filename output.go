@@ -175,8 +175,7 @@ func renderJSON(w io.Writer, m Metrics, r Result, md meta) error {
 		GeneratedAt   time.Time `json:"generated_at"`
 		Metrics
 		Result
-		Weights Weights `json:"weights"`
-	}{schemaVersion, md.Version, md.GeneratedAt.UTC(), m, r, md.Weights})
+	}{schemaVersion, md.Version, md.GeneratedAt.UTC(), m, r})
 }
 
 func describe(item *searchItem) string {

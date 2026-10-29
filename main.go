@@ -124,7 +124,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	result := score(m, defaultWeights)
-	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC(), Weights: defaultWeights}
+	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC()}
 	if opts.json {
 		err = renderJSON(stdout, m, result, md)
 	} else {

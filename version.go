@@ -64,5 +64,4 @@ func (b buildInfo) String() string {
 type meta struct {
 	Version     string
 	GeneratedAt time.Time
-	Weights     Weights
 }
