@@ -16,6 +16,12 @@ const (
 	recentDays = 30
 	// recentSample is how many recent PRs are examined to count repos.
 	recentSample = 100
+	// minProjectStars is the fewest stars a user's own repo needs before its
+	// stars count. It filters out a self-star plus a friend on every repo.
+	minProjectStars = 3
+	// contributorSample is how many merged PRs in the user's own repos are
+	// examined to count distinct contributors.
+	contributorSample = 100
 )
 
 // Global is the user's PR activity across GitHub. It covers public
@@ -33,6 +39,15 @@ type Global struct {
 	// MergedElsewhere is PRs merged in those repositories, excluding the one
 	// being scored.
 	MergedElsewhere int `json:"merged_elsewhere"`
+
+	// Projects maintained: what other people did with the user's own public
+	// repositories. Self-merged PRs in those repos aren't counted because
+	// nobody else judged them, but other people starring and contributing to
+	// the projects is.
+	ProjectStars       int  `json:"project_stars"`
+	ProjectsStarred    int  `json:"projects_starred"`
+	Contributors       int  `json:"contributors"`
+	ContributorsSample bool `json:"contributors_sampled,omitempty"`
 
 	// RecentPRs is PRs opened anywhere in the last recentDays days.
 	RecentPRs int `json:"recent_prs"`
@@ -241,6 +256,10 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 		*c.dst = n
 	}
 
+	if err := collectProjects(src, acct.Login, g); err != nil {
+		return err
+	}
+
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
 	total, items, err := src.Search(prs+" created:>="+since, "desc", recentSample)
 	if err != nil {
@@ -260,6 +279,35 @@ func collectGlobal(src source, repo string, acct account, now time.Time, g *Glob
 			g.RecentTopRepo, g.RecentTopCount = r, n
 		}
 	}
+	return nil
+}
+
+func collectProjects(src source, login string, g *Global) error {
+	stars, err := src.OwnedRepoStars(login)
+	if err != nil {
+		return err
+	}
+	for _, n := range stars {
+		if n >= minProjectStars {
+			g.ProjectStars += n
+			g.ProjectsStarred++
+		}
+	}
+
+	q := fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", login, login)
+	total, items, err := src.Search(q, "desc", contributorSample)
+	if err != nil {
+		return err
+	}
+	people := map[string]bool{}
+	for _, it := range items {
+		// A login differing only in case is the same account.
+		if it.Author != "" && !it.AuthorBot {
+			people[strings.ToLower(it.Author)] = true
+		}
+	}
+	g.Contributors = len(people)
+	g.ContributorsSample = total > len(items)
 	return nil
 }
 

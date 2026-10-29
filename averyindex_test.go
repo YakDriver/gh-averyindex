@@ -31,7 +31,12 @@ type fakeSource struct {
 	mergedQuery string
 	thumbs      int
 	truncated   bool
+	stars       []int
 	err         error
+}
+
+func (f *fakeSource) OwnedRepoStars(string) ([]int, error) {
+	return f.stars, f.err
 }
 
 func (f *fakeSource) Search(q, order string, n int) (int, []searchItem, error) {
@@ -158,6 +163,45 @@ func TestCollectGlobalScope(t *testing.T) {
 		if !strings.Contains(q, " -user:u") || !strings.Contains(q, " is:public") {
 			t.Errorf("global query missing scope: %q", q)
 		}
+	}
+}
+
+func TestCollectProjects(t *testing.T) {
+	const q = "desc|is:pr is:merged is:public user:u -author:u"
+	src := &fakeSource{
+		stars: []int{34, 26, 3, 2, 1, 0},
+		search: map[string]fakeSearch{
+			q: {total: 150, items: []searchItem{
+				{Author: "alice"}, {Author: "Alice"}, {Author: "bob"},
+				{Author: "dependabot[bot]", AuthorBot: true}, {Author: ""},
+			}},
+		},
+	}
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := m.Global
+	// Repos under minProjectStars are ignored: a self-star and a friend on
+	// every throwaway repo shouldn't add up.
+	if g.ProjectStars != 63 || g.ProjectsStarred != 3 {
+		t.Errorf("stars = %d on %d repos, want 63 on 3", g.ProjectStars, g.ProjectsStarred)
+	}
+	// Distinct people, case-insensitive, bots excluded.
+	if g.Contributors != 2 || !g.ContributorsSample {
+		t.Errorf("contributors = %d (sampled %v), want 2 (sampled true)", g.Contributors, g.ContributorsSample)
+	}
+}
+
+func TestScoreCreditsMaintainers(t *testing.T) {
+	// Works mostly in their own projects: no PRs merged in other people's
+	// repos, but their projects have stars and outside contributors.
+	maintainer := Metrics{Global: Global{AccountAgeDays: 1200, ProjectStars: 120, ProjectsStarred: 4, Contributors: 6}}
+	// Same age, many self-merged PRs and nothing else, which no longer count.
+	selfMerger := Metrics{Global: Global{AccountAgeDays: 1200}}
+	m, s := elsewherePoints(score(maintainer, defaultWeights)), elsewherePoints(score(selfMerger, defaultWeights))
+	if m < s+10 {
+		t.Errorf("maintainer elsewhere = %.1f, self-merger = %.1f; want at least 10 more", m, s)
 	}
 }
 
@@ -614,7 +658,8 @@ func TestRenderText(t *testing.T) {
 		`Account created +2024-10-29 \(2\.0 years ago\)`,
 		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
 		`Last 30 days +150 PRs across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
-		`Cap \(elsewhere is at most \+20\) +-16\.6`,
+		`Cap \(elsewhere is at most \+20\) +-9\.7`,
+		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {
 		if !regexp.MustCompile(want).MatchString(out) {
 			t.Errorf("output doesn't match %q:\n%s", want, out)

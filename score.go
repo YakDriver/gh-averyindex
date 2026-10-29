@@ -41,6 +41,8 @@ type Weights struct {
 	// Elsewhere. AccountAge is per doubling of account age in months.
 	AccountAge      float64
 	MergedElsewhere float64
+	ProjectStars    float64
+	Contributors    float64
 	ElsewhereCap    float64
 
 	// Pattern. NotLanding is multiplied by log2(1 + PRs opened in the last
@@ -57,8 +59,10 @@ var defaultWeights = Weights{
 	Issues:         2,
 	ClosedUnmerged: -3,
 
-	AccountAge:      3,
+	AccountAge:      1.5,
 	MergedElsewhere: 4,
+	ProjectStars:    2,
+	Contributors:    4,
 	ElsewhereCap:    20,
 
 	NotLanding: -6,
@@ -129,6 +133,10 @@ func score(m Metrics, w Weights) Result {
 		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge)},
 		{Label: "PRs merged elsewhere", Count: float64(g.MergedElsewhere),
 			Points: points(float64(g.MergedElsewhere), w.MergedElsewhere)},
+		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),
+			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars)},
+		{Label: "Contributors to own projects", Count: float64(g.Contributors),
+			Points: points(float64(g.Contributors), w.Contributors)},
 	}
 	var elsewhereTotal float64
 	for _, c := range elsewhere {

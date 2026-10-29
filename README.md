@@ -70,6 +70,7 @@ The report also shows the user's PR activity across GitHub: account age, PRs ope
 These numbers only cover public repositories the user doesn't own:
 
 - **Own repos are excluded** because anyone can open and merge PRs in their own repo. Counting them would let an account inflate its merge rate and its "merged elsewhere" bonus for free.
+- **Own projects still count, through what other people do with them.** Stars on the user's public, non-fork repos (repos with at least 3 stars) and the number of distinct people whose PRs the user merged into them both add to the score. A maintainer gets credit for projects people use and contribute to. A throwaway account merging its own PRs gets nothing.
 - **Private repos are excluded** so everyone running the tool gets the same answer, and private repo names never appear in the report.
 
 ## Score
@@ -93,8 +94,10 @@ Signals that depend on someone else's judgment (a maintainer merged it without r
 
 | Component | Weight |
 |---|---|
-| Account age, in months | 3 |
+| Account age, in months | 1.5 |
 | PRs merged in other public repositories the user doesn't own | 4 |
+| Stars on the user's own public repos (repos with 3+ stars) | 2 |
+| Distinct people whose PRs the user merged into their own repos (bots excluded) | 4 |
 
 **Pattern** penalizes opening many PRs that don't land. It's uncapped:
 

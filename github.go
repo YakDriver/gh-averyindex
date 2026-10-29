@@ -21,6 +21,8 @@ type searchItem struct {
 	CreatedAt time.Time `json:"created_at"`
 	IsPR      bool      `json:"is_pr"`
 	Repo      string    `json:"repo,omitempty"` // owner/name
+	Author    string    `json:"author,omitempty"`
+	AuthorBot bool      `json:"author_bot,omitempty"`
 }
 
 func (s searchItem) kind() string {
@@ -57,6 +59,9 @@ type source interface {
 	// MergedPRs returns the total count and up to n PRs matching query, with
 	// commits.
 	MergedPRs(query string, n int) (total int, prs []rawPR, err error)
+	// OwnedRepoStars returns the star counts of the user's public, non-fork
+	// repositories, at most the 100 most starred.
+	OwnedRepoStars(login string) ([]int, error)
 	// ThumbsUp sums 👍 reactions on the issues and PRs matching query.
 	// GitHub search returns at most 1,000 results, so truncated reports
 	// whether the sum is incomplete.
@@ -113,6 +118,10 @@ func (g *gitHub) Search(query, order string, n int) (int, []searchItem, error) {
 			CreatedAt     time.Time       `json:"created_at"`
 			PullRequest   json.RawMessage `json:"pull_request"`
 			RepositoryURL string          `json:"repository_url"`
+			User          struct {
+				Login string `json:"login"`
+				Type  string `json:"type"`
+			} `json:"user"`
 		} `json:"items"`
 	}
 	if err := g.get("search/issues?"+v.Encode(), &resp); err != nil {
@@ -125,6 +134,8 @@ func (g *gitHub) Search(query, order string, n int) (int, []searchItem, error) {
 			CreatedAt: it.CreatedAt,
 			IsPR:      len(it.PullRequest) > 0,
 			Repo:      repoFromURL(it.RepositoryURL),
+			Author:    it.User.Login,
+			AuthorBot: it.User.Type == "Bot",
 		})
 	}
 	return resp.TotalCount, items, nil
@@ -313,6 +324,37 @@ func (g *gitHub) MergedPRs(query string, n int) (int, []rawPR, error) {
 		prs = append(prs, pr)
 	}
 	return resp.Search.IssueCount, prs, nil
+}
+
+const ownedReposQuery = `
+query($login: String!) {
+  user(login: $login) {
+    repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100,
+                 orderBy: {field: STARGAZERS, direction: DESC}) {
+      nodes { stargazerCount }
+    }
+  }
+}`
+
+func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
+	var resp struct {
+		User *struct {
+			Repositories struct {
+				Nodes []struct{ StargazerCount int }
+			}
+		}
+	}
+	if err := g.gqlDo(ownedReposQuery, map[string]any{"login": login}, &resp); err != nil {
+		return nil, fmt.Errorf("repositories for %q: %w", login, err)
+	}
+	if resp.User == nil {
+		return nil, nil
+	}
+	stars := make([]int, 0, len(resp.User.Repositories.Nodes))
+	for _, n := range resp.User.Repositories.Nodes {
+		stars = append(stars, n.StargazerCount)
+	}
+	return stars, nil
 }
 
 const thumbsUpQuery = `
