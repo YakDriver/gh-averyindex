@@ -2,10 +2,7 @@ module github.com/YakDriver/gh-averyindex
 
 go 1.27.3
 
-require (
-	github.com/cli/go-gh/v2 v2.17.0
-	golang.org/x/term v0.47.0
-)
+require github.com/cli/go-gh/v2 v2.17.0
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
@@ -19,6 +16,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/thlib/go-timezone-local v0.0.9 // indirect
 	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

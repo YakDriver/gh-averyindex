@@ -111,7 +111,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 
 ## Costs
 
-One user takes about 15 search API calls plus a few other requests. That's usually 10 to 15 seconds, and up to about a minute for someone with thousands of issues and PRs in the repo. In a terminal, a dot appears every 5 seconds while it works.
+One user takes about 15 search API calls plus a few other requests. That's usually 10 to 15 seconds, and up to about a minute for someone with thousands of issues and PRs in the repo. In a terminal, a spinner shows while it works, and the score is highlighted in the report. Neither appears when output is piped or redirected. `NO_COLOR` turns off the highlight, and `TERM=dumb` switches the spinner to ASCII.
 
 If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 

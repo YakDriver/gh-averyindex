@@ -943,49 +943,95 @@ func TestTransientWait(t *testing.T) {
 	}
 }
 
-func TestProgress(t *testing.T) {
+func TestSpinner(t *testing.T) {
 	var buf bytes.Buffer
-	p := newProgress(&buf)
-	p.Start(time.Millisecond)
+	sp := newSpinner(&buf, arcFrames, "Scoring u…")
+	sp.Start(time.Millisecond)
 	deadline := time.Now().Add(time.Second)
 	for {
-		p.mu.Lock()
-		n := strings.Count(buf.String(), ".")
-		p.mu.Unlock()
-		if n >= 2 || time.Now().After(deadline) {
+		sp.mu.Lock()
+		n := strings.Count(buf.String(), "\r")
+		sp.mu.Unlock()
+		if n >= 5 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// A notice starts on its own line instead of after the dots.
-	fmt.Fprintln(p, "GitHub rate limit hit.")
-	p.Stop()
-
+	// A notice clears the spinner line first instead of landing mid-line.
+	fmt.Fprintln(sp, "GitHub rate limit hit.")
+	sp.Stop()
 	out := buf.String()
-	if !regexp.MustCompile(`^\.{2,}\nGitHub rate limit hit\.\n\.*\n?$`).MatchString(out) {
-		t.Errorf("progress output = %q", out)
+
+	// Frames cycle in order, each redrawn in place with \r.
+	if !strings.HasPrefix(out, "\r◜ Scoring u…\r◝ Scoring u…\r◞ Scoring u…\r◟ Scoring u…\r◜ Scoring u…") {
+		t.Errorf("frames = %q", out)
 	}
-	// Stop ends the dot line so the report starts cleanly, and it's safe to
-	// call twice.
-	p.Stop()
-	if !strings.HasSuffix(buf.String(), "\n") {
-		t.Errorf("output doesn't end with a newline: %q", buf.String())
+	if !strings.Contains(out, "Scoring u…"+clearLine+"GitHub rate limit hit.\n") {
+		t.Errorf("notice didn't clear the spinner line: %q", out)
+	}
+	// Nothing is left on screen after Stop, so the report starts cleanly.
+	if !strings.HasSuffix(out, "\n") && !strings.HasSuffix(out, clearLine) {
+		t.Errorf("spinner line left behind: %q", out)
+	}
+	sp.Stop() // safe twice
+}
+
+func TestSpinnerFastRunPrintsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	sp := newSpinner(&buf, arcFrames, "x")
+	sp.Start(time.Hour)
+	sp.Stop()
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want nothing", buf.String())
 	}
 }
 
-func TestProgressNoDotsNoNewline(t *testing.T) {
-	var buf bytes.Buffer
-	p := newProgress(&buf)
-	p.Start(time.Hour)
-	p.Stop()
-	if buf.Len() != 0 {
-		t.Errorf("output = %q, want nothing for a fast run", buf.String())
+func TestSpinnerFrames(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	if got := spinnerFrames(); !slices.Equal(got, arcFrames) {
+		t.Errorf("xterm frames = %v", got)
+	}
+	t.Setenv("TERM", "dumb")
+	if got := spinnerFrames(); !slices.Equal(got, asciiFrames) {
+		t.Errorf("TERM=dumb frames = %v, want ASCII", got)
+	}
+}
+
+func TestRenderTextHighlightsScore(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 3, PRsMerged: 3}
+	r := score(m, defaultWeights)
+
+	var plain, color bytes.Buffer
+	if err := renderText(&plain, m, r, testMeta); err != nil {
+		t.Fatal(err)
+	}
+	md := testMeta
+	md.Color = true
+	if err := renderText(&color, m, r, md); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(plain.String(), "\033[") {
+		t.Errorf("escape codes without color:\n%q", plain.String())
+	}
+	// The header score and the final score row are highlighted, and nothing
+	// else changes.
+	header := "u in o/r  ·  Contributor  ·  \033[1;36maveryindex 24\033[0m\n"
+	if !strings.HasPrefix(color.String(), header) {
+		t.Errorf("header = %q", strings.SplitN(color.String(), "\n", 2)[0])
+	}
+	if got := strings.Count(color.String(), "\033[1;36m"); got != 2 {
+		t.Errorf("%d highlights, want 2", got)
+	}
+	stripped := regexp.MustCompile("\033\\[[0-9;]*m").ReplaceAllString(color.String(), "")
+	if stripped != plain.String() {
+		t.Errorf("color output differs from plain beyond escape codes")
 	}
 }
 
 func TestStartProgressOnlyOnTerminal(t *testing.T) {
 	var buf bytes.Buffer
-	stop := startProgress(&buf)
+	stop := startProgress(&buf, "x")
 	stop()
 	if notices != os.Stderr || buf.Len() != 0 {
 		t.Errorf("progress started on a non-terminal writer")

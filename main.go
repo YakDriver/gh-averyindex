@@ -206,7 +206,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	now := time.Now()
-	stopProgress := startProgress(stderr)
+	stopProgress := startProgress(stderr, fmt.Sprintf("Scoring %s in %s…", acct.Login, fullName))
 	m, err := collect(gh, fullName, acct, now)
 	stopProgress()
 	if err != nil {
@@ -216,6 +216,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	result := score(m, defaultWeights)
 	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC()}
+	if f, ok := stdout.(*os.File); ok && isTerminal(f) && colorEnabled() {
+		md.Color = true
+	}
 	if opts.json {
 		err = renderJSON(stdout, m, result, md)
 	} else {
@@ -241,20 +244,21 @@ func notAPerson(acct account) string {
 	return ""
 }
 
-// startProgress prints a dot every few seconds while data is collected, when
-// stderr is a terminal, and routes notices through it so they start on their
-// own line. The returned func stops it; call it before printing the report.
-func startProgress(stderr io.Writer) func() {
+// startProgress shows a spinner while data is collected, when stderr is a
+// terminal, and routes notices through it so they don't land mid-line. The
+// returned func stops it and erases its line; call it before printing the
+// report.
+func startProgress(stderr io.Writer, label string) func() {
 	f, ok := stderr.(*os.File)
 	if !ok || !isTerminal(f) {
 		return func() {}
 	}
-	p := newProgress(stderr)
+	sp := newSpinner(stderr, spinnerFrames(), label)
 	old := notices
-	notices = p
-	p.Start(progressInterval)
+	notices = sp
+	sp.Start(spinnerInterval)
 	return func() {
-		p.Stop()
+		sp.Stop()
 		notices = old
 	}
 }

@@ -6,75 +6,107 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/term"
+	"github.com/cli/go-gh/v2/pkg/term"
 )
 
-// progressInterval is how often a dot is printed while collecting.
-const progressInterval = 5 * time.Second
+const (
+	// spinnerInterval is how long each spinner frame shows.
+	spinnerInterval = 120 * time.Millisecond
 
-// progress prints a dot to w at a fixed interval so a long run doesn't look
-// hung. It's also an io.Writer for notices: anything written through it
-// starts on a fresh line instead of after the dots.
-type progress struct {
+	// clearLine returns to the start of the line and erases it.
+	clearLine = "\r\033[K"
+)
+
+var (
+	// arcFrames is a thin arc orbiting.
+	arcFrames = []string{"◜", "◝", "◞", "◟"}
+	// asciiFrames is for terminals that may not render the arc.
+	asciiFrames = []string{"|", "/", "-", `\`}
+)
+
+// spinnerFrames picks frames for the current terminal. TERM=dumb usually
+// means a basic terminal or an editor's output pane.
+func spinnerFrames() []string {
+	if os.Getenv("TERM") == "dumb" {
+		return asciiFrames
+	}
+	return arcFrames
+}
+
+// spinner animates a frame and label in place on one line so a long run
+// doesn't look hung. It's also an io.Writer for notices: it clears its line
+// before anything else is written, then redraws on the next frame.
+type spinner struct {
 	mu     sync.Mutex
 	w      io.Writer
-	dotted bool
+	frames []string
+	label  string
+	frame  int
+	drawn  bool
 	stop   chan struct{}
 	done   chan struct{}
 }
 
-func newProgress(w io.Writer) *progress {
-	return &progress{w: w}
+func newSpinner(w io.Writer, frames []string, label string) *spinner {
+	return &spinner{w: w, frames: frames, label: label}
 }
 
-// Start prints a dot every interval until Stop is called.
-func (p *progress) Start(interval time.Duration) {
-	p.stop, p.done = make(chan struct{}), make(chan struct{})
+// Start animates until Stop is called.
+func (s *spinner) Start(interval time.Duration) {
+	s.stop, s.done = make(chan struct{}), make(chan struct{})
 	go func() {
-		defer close(p.done)
+		defer close(s.done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
-			case <-p.stop:
+			case <-s.stop:
 				return
 			case <-t.C:
-				p.mu.Lock()
-				io.WriteString(p.w, ".")
-				p.dotted = true
-				p.mu.Unlock()
+				s.mu.Lock()
+				io.WriteString(s.w, "\r"+s.frames[s.frame%len(s.frames)]+" "+s.label)
+				s.frame++
+				s.drawn = true
+				s.mu.Unlock()
 			}
 		}
 	}()
 }
 
-// Stop stops the dots and ends their line.
-func (p *progress) Stop() {
-	if p.stop != nil {
-		close(p.stop)
-		<-p.done
-		p.stop = nil
+// Stop stops the animation and erases the spinner line. It's safe to call
+// more than once.
+func (s *spinner) Stop() {
+	if s.stop != nil {
+		close(s.stop)
+		<-s.done
+		s.stop = nil
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.endLine()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clear()
 }
 
-func (p *progress) Write(b []byte) (int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.endLine()
-	return p.w.Write(b)
+func (s *spinner) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clear()
+	return s.w.Write(b)
 }
 
-func (p *progress) endLine() {
-	if p.dotted {
-		io.WriteString(p.w, "\n")
-		p.dotted = false
+func (s *spinner) clear() {
+	if s.drawn {
+		io.WriteString(s.w, clearLine)
+		s.drawn = false
 	}
 }
 
 // isTerminal reports whether f is an interactive terminal.
 func isTerminal(f *os.File) bool {
-	return term.IsTerminal(int(f.Fd()))
+	return term.IsTerminal(f)
+}
+
+// colorEnabled reports whether stdout should get color, following gh's
+// conventions (NO_COLOR, CLICOLOR_FORCE, GH_FORCE_TTY).
+func colorEnabled() bool {
+	return term.FromEnv().IsColorEnabled()
 }

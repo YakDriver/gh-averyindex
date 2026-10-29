@@ -13,7 +13,8 @@ import (
 )
 
 func renderText(w io.Writer, m Metrics, r Result, md meta) error {
-	fmt.Fprintf(w, "%s in %s  ·  %s  ·  averyindex %d\n", m.User, m.Repo, r.Tier, r.Score)
+	fmt.Fprintf(w, "%s in %s  ·  %s  ·  %s\n", m.User, m.Repo, r.Tier,
+		highlight(fmt.Sprintf("averyindex %d", r.Score), md.Color))
 	for _, f := range r.Flags {
 		fmt.Fprintf(w, "  ⚠ %s\n", f.Message)
 	}
@@ -67,10 +68,18 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 		}
 		fmt.Fprintf(w, "    %s%9s  %7s\n", pad(labels[i], width-2), n, signed(c.Points))
 	}
-	fmt.Fprintf(w, "  %s%9s  %7d\n", pad("averyindex", width), r.Tier, r.Score)
+	fmt.Fprintf(w, "  %s\n", highlight(fmt.Sprintf("%s%9s  %7d", pad("averyindex", width), r.Tier, r.Score), md.Color))
 
 	fmt.Fprintf(w, "\naveryindex %s · %s\n", md.Version, md.GeneratedAt.UTC().Format("2006-01-02 15:04 MST"))
 	return nil
+}
+
+// highlight makes s bold cyan when color is on.
+func highlight(s string, color bool) string {
+	if !color {
+		return s
+	}
+	return "\033[1;36m" + s + "\033[0m"
 }
 
 // pad right-pads s with spaces to width runes.
