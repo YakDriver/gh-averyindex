@@ -253,7 +253,7 @@ func startProgress(stderr io.Writer, label string) func() {
 	if !ok || !isTerminal(f) {
 		return func() {}
 	}
-	sp := newSpinner(stderr, spinnerFrames(), label)
+	sp := newSpinner(stderr, spinnerFrames(), label, terminalWidth(f))
 	old := notices
 	notices = sp
 	sp.Start(spinnerInterval)

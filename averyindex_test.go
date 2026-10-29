@@ -971,42 +971,71 @@ func TestRenderTextPointsAtScore(t *testing.T) {
 	}
 }
 
-func TestSpinner(t *testing.T) {
+// spinnerOutput runs a spinner until it has drawn at least frames frames,
+// writes a notice, stops it, and returns everything it wrote.
+func spinnerOutput(t *testing.T, sp *spinner, frames int) string {
+	t.Helper()
 	var buf bytes.Buffer
-	sp := newSpinner(&buf, arcFrames, "Scoring u…")
+	sp.w = &buf
 	sp.Start(time.Millisecond)
 	deadline := time.Now().Add(time.Second)
 	for {
 		sp.mu.Lock()
-		n := strings.Count(buf.String(), "\r")
+		n := sp.frame
 		sp.mu.Unlock()
-		if n >= 5 || time.Now().After(deadline) {
+		if n >= frames || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// A notice clears the spinner line first instead of landing mid-line.
 	fmt.Fprintln(sp, "GitHub rate limit hit.")
 	sp.Stop()
-	out := buf.String()
+	sp.Stop() // safe twice
+	return buf.String()
+}
+
+func TestSpinner(t *testing.T) {
+	out := spinnerOutput(t, newSpinner(nil, arcFrames, "Scoring u…", 80), 5)
 
 	// Frames cycle in order, each redrawn in place with \r.
 	if !strings.HasPrefix(out, "\r◜ Scoring u…\r◝ Scoring u…\r◞ Scoring u…\r◟ Scoring u…\r◜ Scoring u…") {
 		t.Errorf("frames = %q", out)
 	}
-	if !strings.Contains(out, "Scoring u…"+clearLine+"GitHub rate limit hit.\n") {
-		t.Errorf("notice didn't clear the spinner line: %q", out)
+	// A notice erases the spinner row first, with spaces rather than an ANSI
+	// code, so it works on basic terminals (Copilot on #25).
+	blank := "\r" + strings.Repeat(" ", len([]rune("◜ Scoring u…"))) + "\r"
+	if !strings.Contains(out, blank+"GitHub rate limit hit.\n") {
+		t.Errorf("notice didn't erase the spinner row: %q", out)
 	}
-	// Nothing is left on screen after Stop, so the report starts cleanly.
-	if !strings.HasSuffix(out, "\n") && !strings.HasSuffix(out, clearLine) {
-		t.Errorf("spinner line left behind: %q", out)
+	if strings.Contains(out, "\033") {
+		t.Errorf("escape codes in spinner output: %q", out)
 	}
-	sp.Stop() // safe twice
+}
+
+func TestSpinnerFitsNarrowTerminal(t *testing.T) {
+	// Copilot on #25: a line wider than the terminal wraps, and \r can't get
+	// back to the rows above.
+	label := "Scoring a-very-long-login in some-organization/some-repository-name…"
+	out := spinnerOutput(t, newSpinner(nil, arcFrames, label, 30), 2)
+	for part := range strings.SplitSeq(strings.ReplaceAll(out, "\n", "\r"), "\r") {
+		if n := utf8.RuneCountInString(part); n > 29 {
+			t.Errorf("drew %d columns on a 30-column terminal: %q", n, part)
+		}
+	}
+	if !strings.Contains(out, "◜ Scoring a-very-long-login …") {
+		t.Errorf("label not cut with an ellipsis: %q", out)
+	}
+}
+
+func TestSpinnerDefaultWidth(t *testing.T) {
+	if sp := newSpinner(nil, arcFrames, "x", 0); sp.width != defaultWidth {
+		t.Errorf("width = %d, want %d when unknown", sp.width, defaultWidth)
+	}
 }
 
 func TestSpinnerFastRunPrintsNothing(t *testing.T) {
 	var buf bytes.Buffer
-	sp := newSpinner(&buf, arcFrames, "x")
+	sp := newSpinner(&buf, arcFrames, "x", 80)
 	sp.Start(time.Hour)
 	sp.Stop()
 	if buf.Len() != 0 {

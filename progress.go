@@ -3,18 +3,21 @@ package main
 import (
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cli/go-gh/v2/pkg/term"
+	xterm "golang.org/x/term"
 )
 
 const (
 	// spinnerInterval is how long each spinner frame shows.
 	spinnerInterval = 120 * time.Millisecond
 
-	// clearLine returns to the start of the line and erases it.
-	clearLine = "\r\033[K"
+	// defaultWidth is used when the terminal width can't be read.
+	defaultWidth = 80
 )
 
 var (
@@ -33,22 +36,40 @@ func spinnerFrames() []string {
 	return arcFrames
 }
 
-// spinner animates a frame and label in place on one line so a long run
-// doesn't look hung. It's also an io.Writer for notices: it clears its line
+// spinner animates a frame and label in place on one row so a long run
+// doesn't look hung. It's also an io.Writer for notices: it erases its row
 // before anything else is written, then redraws on the next frame.
+//
+// It never wraps, because \r only returns to the start of the current row:
+// the line is cut to fit the terminal. It erases by overwriting with spaces
+// rather than an ANSI erase code, so it works on basic terminals too.
 type spinner struct {
 	mu     sync.Mutex
 	w      io.Writer
 	frames []string
 	label  string
+	width  int // terminal columns
 	frame  int
-	drawn  bool
+	drawn  int // columns currently on screen
 	stop   chan struct{}
 	done   chan struct{}
 }
 
-func newSpinner(w io.Writer, frames []string, label string) *spinner {
-	return &spinner{w: w, frames: frames, label: label}
+func newSpinner(w io.Writer, frames []string, label string, width int) *spinner {
+	if width <= 0 {
+		width = defaultWidth
+	}
+	return &spinner{w: w, frames: frames, label: label, width: width}
+}
+
+// line is the frame and label, cut to leave the terminal's last column
+// free. Writing into the last column makes some terminals wrap early.
+func (s *spinner) line() string {
+	l := []rune(s.frames[s.frame%len(s.frames)] + " " + s.label)
+	if limit := s.width - 1; len(l) > limit {
+		l = append(l[:max(0, limit-1)], '…')
+	}
+	return string(l)
 }
 
 // Start animates until Stop is called.
@@ -64,9 +85,12 @@ func (s *spinner) Start(interval time.Duration) {
 				return
 			case <-t.C:
 				s.mu.Lock()
-				io.WriteString(s.w, "\r"+s.frames[s.frame%len(s.frames)]+" "+s.label)
+				l := s.line()
+				// Pad over any longer line left from before.
+				n := utf8.RuneCountInString(l)
+				io.WriteString(s.w, "\r"+l+strings.Repeat(" ", max(0, s.drawn-n)))
 				s.frame++
-				s.drawn = true
+				s.drawn = max(n, s.drawn)
 				s.mu.Unlock()
 			}
 		}
@@ -94,10 +118,19 @@ func (s *spinner) Write(b []byte) (int, error) {
 }
 
 func (s *spinner) clear() {
-	if s.drawn {
-		io.WriteString(s.w, clearLine)
-		s.drawn = false
+	if s.drawn > 0 {
+		io.WriteString(s.w, "\r"+strings.Repeat(" ", s.drawn)+"\r")
+		s.drawn = 0
 	}
+}
+
+// terminalWidth is f's width in columns, or 0 if it can't be read.
+func terminalWidth(f *os.File) int {
+	w, _, err := xterm.GetSize(int(f.Fd()))
+	if err != nil {
+		return 0
+	}
+	return w
 }
 
 // isTerminal reports whether f is an interactive terminal.
