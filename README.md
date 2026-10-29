@@ -123,3 +123,14 @@ The weights and tiers in [`score.go`](score.go) are a first guess.
 One user takes about 12 search API calls and 2 or more GraphQL queries, usually 10 to 15 seconds.
 
 GitHub limits search to 30 requests per minute and also has an unpublished secondary limit that trips when you score several users in a row. When either one hits, the tool prints a line to stderr saying how long it's waiting and until when, then retries (up to 3 times, waiting at most 2 minutes each). If the wait would be longer, it says so and exits.
+
+## Development
+
+```sh
+make help     # list targets
+make ci       # run every check CI runs: build, gofmt, go fix, vet, test
+make fix fmt  # apply go fix and gofmt
+make install  # install your local build as the gh extension
+```
+
+CI runs each check as a separate job on every pull request and on pushes to `main`. `fix-check` fails if `go fix` would change anything, so run `make fix` before pushing.

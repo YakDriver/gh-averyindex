@@ -200,8 +200,7 @@ func retryNotice(wait time.Duration, attempt int, now time.Time) string {
 // rate limit response.
 func rateLimitWait(err error, now time.Time) (time.Duration, bool) {
 	// GraphQL reports its rate limit as an error in a 200 response.
-	var gqlErr *api.GraphQLError
-	if errors.As(err, &gqlErr) {
+	if gqlErr, ok := errors.AsType[*api.GraphQLError](err); ok {
 		for _, e := range gqlErr.Errors {
 			if e.Type == "RATE_LIMITED" {
 				return time.Minute, true
