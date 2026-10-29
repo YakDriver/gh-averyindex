@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 )
 
 func renderText(w io.Writer, m Metrics, r Result) error {
@@ -41,18 +42,77 @@ func renderText(w io.Writer, m Metrics, r Result) error {
 		return err
 	}
 
+	renderGlobal(w, m.Global)
+
 	fmt.Fprintln(w, "\nScore")
-	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	for _, c := range r.Components {
-		label, count := c.Label, thousands(int(c.Count))
-		if c.Label == codeCreditLabel {
-			label = fmt.Sprintf("%s (%s merged × %.2f)", c.Label, thousands(m.PRsMerged), m.AvgCredit())
-			count = fmt.Sprintf("%.1f", c.Count)
+	labels := make([]string, len(r.Components))
+	width := len("averyindex")
+	for i, c := range r.Components {
+		labels[i] = c.Label
+		if c.Detail != "" {
+			labels[i] += " (" + c.Detail + ")"
 		}
-		fmt.Fprintf(tw, "  %s\t%9s\t%7s\n", label, count, signed(c.Points))
+		// Component rows are indented two more than group headers.
+		width = max(width, utf8.RuneCountInString(labels[i])+2)
 	}
-	fmt.Fprintf(tw, "  averyindex\t%9s\t%7d\n", r.Tier, r.Score)
-	return tw.Flush()
+	group := ""
+	for i, c := range r.Components {
+		if c.Group != group {
+			group = c.Group
+			fmt.Fprintf(w, "  %s\n", group)
+		}
+		n := count(c.Count)
+		if c.Label == "Cap" {
+			n = ""
+		}
+		fmt.Fprintf(w, "    %s%9s  %7s\n", pad(labels[i], width-2), n, signed(c.Points))
+	}
+	fmt.Fprintf(w, "  %s%9s  %7d\n", pad("averyindex", width), r.Tier, r.Score)
+	return nil
+}
+
+// pad right-pads s with spaces to width runes.
+func pad(s string, width int) string {
+	return s + strings.Repeat(" ", max(0, width-utf8.RuneCountInString(s)))
+}
+
+func renderGlobal(w io.Writer, g Global) {
+	fmt.Fprintln(w, "\nElsewhere on GitHub")
+	created := "unknown"
+	if !g.AccountCreated.IsZero() {
+		created = fmt.Sprintf("%s (%s ago)", date(g.AccountCreated), age(g.AccountAgeDays))
+	}
+	rate := "no resolved PRs"
+	if r, ok := g.MergeRate(); ok {
+		rate = fmt.Sprintf("%.0f%% of %s resolved", r*100, thousands(g.PRsMerged+g.ClosedUnmerged()))
+	}
+	recent := fmt.Sprintf("%s PRs", thousands(g.RecentPRs))
+	if g.RecentPRs > 0 {
+		recent += fmt.Sprintf(" across %d repos (most: %d in %s)", g.RecentRepos, g.RecentTopCount, g.RecentTopRepo)
+		if g.RecentPRs > g.RecentSampled {
+			recent += fmt.Sprintf(", repos from the newest %d", g.RecentSampled)
+		}
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, row := range [][2]string{
+		{"Account created", created},
+		{"PRs opened", fmt.Sprintf("%s · %s merged · %s open · %s closed unmerged",
+			thousands(g.PRsOpened), thousands(g.PRsMerged), thousands(g.PRsOpen), thousands(g.ClosedUnmerged()))},
+		{"Merge rate", rate},
+		{fmt.Sprintf("Last %d days", recentDays), recent},
+	} {
+		fmt.Fprintf(tw, "  %s\t%s\n", row[0], row[1])
+	}
+	tw.Flush()
+}
+
+// count formats whole numbers with separators and fractions to one place.
+func count(f float64) string {
+	if f == math.Trunc(f) {
+		return thousands(int(f))
+	}
+	return fmt.Sprintf("%.1f", f)
 }
 
 func renderPRs(w io.Writer, m Metrics) error {

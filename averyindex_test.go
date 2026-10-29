@@ -7,11 +7,15 @@ import (
 	"flag"
 	"io"
 	"math"
+	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cli/go-gh/v2/pkg/api"
 )
 
 type fakeSearch struct {
@@ -49,6 +53,8 @@ func (f *fakeSource) ThumbsUp(string) (int, bool, error) {
 	return f.thumbs, f.truncated, nil
 }
 
+var testNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+
 func day(s string) time.Time {
 	t, err := time.Parse(time.DateOnly, s)
 	if err != nil {
@@ -71,6 +77,12 @@ func TestCollect(t *testing.T) {
 			"asc|" + r + " author:u":                   {total: 14, items: []searchItem{first}},
 			"desc|" + r + " author:u":                  {total: 14, items: []searchItem{last}},
 			"desc|" + r + " is:pr author:u is:open":    {total: 1, items: []searchItem{open}},
+			"|is:pr author:u":                          {total: 110},
+			"|is:pr author:u is:merged":                {total: 40},
+			"|is:pr author:u is:open":                  {total: 30},
+			"desc|is:pr author:u created:>=2026-09-29": {total: 4, items: []searchItem{
+				{Repo: "a/x"}, {Repo: "b/y"}, {Repo: "b/y"}, {Repo: "c/z"},
+			}},
 		},
 		merged: 6,
 		prs: []rawPR{
@@ -80,7 +92,7 @@ func TestCollect(t *testing.T) {
 		thumbs: 9,
 	}
 
-	m, err := collect(src, "o/r", "u")
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +122,14 @@ func TestCollect(t *testing.T) {
 	if got := m.CodeCredit(); got != 4.5 {
 		t.Errorf("CodeCredit() = %v, want 4.5 (6 merged × 0.75)", got)
 	}
+	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30,
+		RecentPRs: 4, RecentRepos: 3, RecentTopRepo: "b/y", RecentTopCount: 2, RecentSampled: 4}
+	if m.Global != wantGlobal {
+		t.Errorf("Global =\n%+v\nwant\n%+v", m.Global, wantGlobal)
+	}
+	if got := m.MergedElsewhere(); got != 34 {
+		t.Errorf("MergedElsewhere() = %d, want 34", got)
+	}
 	for key := range src.search {
 		if !slices.Contains(src.queries, key) {
 			t.Errorf("query not issued: %q", key)
@@ -117,9 +137,39 @@ func TestCollect(t *testing.T) {
 	}
 }
 
+func TestCollectAccountAge(t *testing.T) {
+	src := &fakeSource{}
+	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: testNow.AddDate(0, 0, -17)}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Global.AccountAgeDays != 17 {
+		t.Errorf("AccountAgeDays = %d, want 17", m.Global.AccountAgeDays)
+	}
+}
+
+func TestRecentTopRepoTieBreak(t *testing.T) {
+	src := &fakeSource{search: map[string]fakeSearch{
+		"desc|is:pr author:u created:>=2026-09-29": {total: 2, items: []searchItem{{Repo: "z/z"}, {Repo: "a/a"}}},
+	}}
+	m, _ := collect(src, "o/r", account{Login: "u"}, testNow)
+	if m.Global.RecentTopRepo != "a/a" {
+		t.Errorf("RecentTopRepo = %q, want a/a", m.Global.RecentTopRepo)
+	}
+}
+
+func TestSmoothedMergeRate(t *testing.T) {
+	if got := (Global{}).SmoothedMergeRate(); got != 0.5 {
+		t.Errorf("no history = %v, want 0.5", got)
+	}
+	if got := (Global{PRsOpened: 8, PRsMerged: 8}).SmoothedMergeRate(); got != 0.9 {
+		t.Errorf("8 of 8 = %v, want 0.9", got)
+	}
+}
+
 func TestCollectNoPRsSkipsPRQueries(t *testing.T) {
 	src := &fakeSource{}
-	m, err := collect(src, "o/r", "u")
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +183,7 @@ func TestCollectNoPRsSkipsPRQueries(t *testing.T) {
 
 func TestCollectError(t *testing.T) {
 	src := &fakeSource{err: errors.New("rate limited")}
-	if _, err := collect(src, "o/r", "u"); err == nil {
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -253,6 +303,200 @@ func TestScoreComponentsSumToScore(t *testing.T) {
 	}
 }
 
+func TestScoreGroups(t *testing.T) {
+	m := Metrics{PRsOpened: 1, PRsMerged: 1, Global: Global{AccountAgeDays: 400, PRsOpened: 1, PRsMerged: 1, RecentPRs: 1}}
+	r := score(m, defaultWeights)
+	var groups []string
+	for _, c := range r.Components {
+		if !slices.Contains(groups, c.Group) {
+			groups = append(groups, c.Group)
+		}
+	}
+	if !slices.Equal(groups, []string{groupHere, groupElsewhere, groupPattern}) {
+		t.Errorf("groups = %v", groups)
+	}
+}
+
+func elsewherePoints(r Result) float64 {
+	var sum float64
+	for _, c := range r.Components {
+		if c.Group == groupElsewhere {
+			sum += c.Points
+		}
+	}
+	return sum
+}
+
+func TestScoreElsewhereCapped(t *testing.T) {
+	famous := Metrics{Global: Global{AccountAgeDays: 5000, PRsOpened: 6000, PRsMerged: 5000}}
+	r := score(famous, defaultWeights)
+	if got := elsewherePoints(r); math.Abs(got-defaultWeights.ElsewhereCap) > 1e-9 {
+		t.Errorf("elsewhere = %v, want cap %v", got, defaultWeights.ElsewhereCap)
+	}
+	if r.Tier != "Contributor" {
+		t.Errorf("famous but new here: tier %q, want Contributor", r.Tier)
+	}
+
+	newbie := Metrics{Global: Global{AccountAgeDays: 30}}
+	if slices.ContainsFunc(score(newbie, defaultWeights).Components, func(c Component) bool { return c.Label == "Cap" }) {
+		t.Error("cap applied below the cap")
+	}
+}
+
+func TestScoreNotLanding(t *testing.T) {
+	notLanding := func(g Global) float64 {
+		for _, c := range score(Metrics{Global: g}, defaultWeights).Components {
+			if c.Group == groupPattern {
+				return c.Points
+			}
+		}
+		t.Fatal("no pattern component")
+		return 0
+	}
+
+	// 106 PRs in 17 days, 2 merged, 19 closed unmerged.
+	spray := notLanding(Global{PRsOpened: 106, PRsMerged: 2, PRsOpen: 85, RecentPRs: 106})
+	// 60 PRs a month with a 90% merge rate.
+	prolific := notLanding(Global{PRsOpened: 2000, PRsMerged: 1800, PRsOpen: 0, RecentPRs: 60})
+	// One open PR, no history.
+	first := notLanding(Global{PRsOpened: 1, PRsOpen: 1, RecentPRs: 1})
+
+	if spray > -25 {
+		t.Errorf("spray penalty = %.1f, want below -25", spray)
+	}
+	if prolific < -1 {
+		t.Errorf("prolific penalty = %.1f, want above -1", prolific)
+	}
+	if first < -2 {
+		t.Errorf("first PR penalty = %.1f, want above -2", first)
+	}
+}
+
+func TestScoreSprayAccountScoresBadly(t *testing.T) {
+	// The pattern from a 17-day-old account that opened 106 PRs across 22 repos.
+	spray := Metrics{PRsOpened: 2, Global: Global{AccountAgeDays: 17, PRsOpened: 106, PRsMerged: 2, PRsOpen: 85, RecentPRs: 106}}
+	// A real newcomer: established account, one closed PR here.
+	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, RecentPRs: 2}}
+
+	s, n := score(spray, defaultWeights).Score, score(newcomer, defaultWeights).Score
+	if s > -20 {
+		t.Errorf("spray account scored %d, want -20 or below", s)
+	}
+	if n <= 0 {
+		t.Errorf("newcomer scored %d, want positive", n)
+	}
+}
+
+func TestAge(t *testing.T) {
+	for days, want := range map[int]string{17: "17 days", 59: "59 days", 365: "12 months", 3000: "8.2 years"} {
+		if got := age(days); got != want {
+			t.Errorf("age(%d) = %q, want %q", days, got, want)
+		}
+	}
+}
+
+func TestRateLimitWait(t *testing.T) {
+	now := time.Unix(1000, 0)
+	httpErr := func(status int, msg string, headers map[string]string) error {
+		h := http.Header{}
+		for k, v := range headers {
+			h.Set(k, v)
+		}
+		return &api.HTTPError{StatusCode: status, Message: msg, Headers: h}
+	}
+	tests := []struct {
+		name   string
+		err    error
+		want   time.Duration
+		wantOK bool
+	}{
+		{"nil", nil, 0, false},
+		{"not HTTP", errors.New("boom"), 0, false},
+		{"not found", httpErr(404, "Not Found", nil), 0, false},
+		{"forbidden, not rate limit", httpErr(403, "Resource not accessible", nil), 0, false},
+		{"retry-after", httpErr(403, "secondary rate limit", map[string]string{"Retry-After": "30"}), 30 * time.Second, true},
+		{"reset header", httpErr(403, "API rate limit exceeded", map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1045"}), 46 * time.Second, true},
+		{"secondary, no headers", httpErr(403, "You have exceeded a secondary rate limit", nil), time.Minute, true},
+		{"429", httpErr(429, "", map[string]string{"Retry-After": "5"}), 5 * time.Second, true},
+		{"graphql rate limited", &api.GraphQLError{Errors: []api.GraphQLErrorItem{{Type: "RATE_LIMITED"}}}, time.Minute, true},
+		{"graphql other error", &api.GraphQLError{Errors: []api.GraphQLErrorItem{{Type: "NOT_FOUND"}}}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := rateLimitWait(tt.err, now)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("rateLimitWait() = %v, %v; want %v, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestWithRetryAnnouncesWaits(t *testing.T) {
+	var buf bytes.Buffer
+	var slept []time.Duration
+	notices, sleep = &buf, func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { notices, sleep = os.Stderr, time.Sleep })
+
+	limited := &api.HTTPError{StatusCode: 403, Message: "secondary rate limit", Headers: http.Header{"Retry-After": {"7"}}}
+	calls := 0
+	err := withRetry(func() error {
+		calls++
+		if calls < 3 {
+			return limited
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("withRetry() = %v after %d calls, want nil after 3", err, calls)
+	}
+	if !slices.Equal(slept, []time.Duration{7 * time.Second, 7 * time.Second}) {
+		t.Errorf("slept %v", slept)
+	}
+	out := buf.String()
+	for _, want := range []string{"attempt 1 of 3", "attempt 2 of 3", "Waiting 7s", "Not hung."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notices missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestWithRetryGivesUpLoudly(t *testing.T) {
+	var buf bytes.Buffer
+	notices, sleep = &buf, func(time.Duration) {}
+	t.Cleanup(func() { notices, sleep = os.Stderr, time.Sleep })
+
+	limited := &api.HTTPError{StatusCode: 403, Message: "secondary rate limit", Headers: http.Header{"Retry-After": {"1"}}}
+	if err := withRetry(func() error { return limited }); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(buf.String(), "giving up") {
+		t.Errorf("no give-up notice:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	long := &api.HTTPError{StatusCode: 403, Message: "rate limit", Headers: http.Header{"Retry-After": {"3600"}}}
+	if err := withRetry(func() error { return long }); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(buf.String(), "longer than the 2m0s") {
+		t.Errorf("no too-long notice:\n%s", buf.String())
+	}
+}
+
+func TestRetryNotice(t *testing.T) {
+	got := retryNotice(time.Minute, 1, time.Date(2026, 10, 29, 9, 40, 0, 0, time.UTC))
+	want := "GitHub rate limit hit. Waiting 1m0s (until 09:41:00) before retrying, attempt 1 of 3. Not hung."
+	if got != want {
+		t.Errorf("retryNotice() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestRepoFromURL(t *testing.T) {
+	if got := repoFromURL("https://api.github.com/repos/o/r"); got != "o/r" {
+		t.Errorf("repoFromURL() = %q", got)
+	}
+}
+
 func TestScoreHelpfulBeatsDriveBy(t *testing.T) {
 	regular := Metrics{PRsOpened: 5, PRsMerged: 4, Issues: 3, Threads: 15, ThumbsUp: 10}
 	driveBy := Metrics{PRsOpened: 30, PRsMerged: 1}
@@ -315,6 +559,9 @@ func TestRenderText(t *testing.T) {
 			{Number: 70, MergedAt: day("2026-10-02"), Additions: 1500, Deletions: 30, Rework: 0.12, Credit: 0.88, CommitsBy: []string{"u-work"}, CommitsTruncated: true},
 		},
 		OpenPRs: []searchItem{{Number: 71, CreatedAt: day("2026-10-20"), IsPR: true}},
+		Global: Global{AccountCreated: day("2024-10-29"), AccountAgeDays: 730,
+			PRsOpened: 1300, PRsMerged: 1250, PRsOpen: 12,
+			RecentPRs: 150, RecentRepos: 2, RecentTopRepo: "o/r", RecentTopCount: 70, RecentSampled: 100},
 	}
 	var buf bytes.Buffer
 	if err := renderText(&buf, m, score(m, defaultWeights)); err != nil {
@@ -332,10 +579,26 @@ func TestRenderText(t *testing.T) {
 		"and 11 more open",
 		"Rework checked on the 1 most recent merged PRs.",
 		"Code credit (1,200 merged × 0.88)",
+		"Elsewhere on GitHub",
 		"averyindex",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{
+		`Account created +2024-10-29 \(2\.0 years ago\)`,
+		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
+		`Last 30 days +150 PRs across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
+		`Cap \(elsewhere is at most \+20\) +-16\.6`,
+	} {
+		if !regexp.MustCompile(want).MatchString(out) {
+			t.Errorf("output doesn't match %q:\n%s", want, out)
+		}
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if strings.TrimRight(line, " ") != line {
+			t.Errorf("line %d has trailing spaces: %q", i+1, line)
 		}
 	}
 	if strings.Contains(out, "Drive-by") {

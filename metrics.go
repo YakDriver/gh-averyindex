@@ -12,7 +12,52 @@ const (
 	recentMergedSample = 5
 	// openPRList is how many open PRs are listed.
 	openPRList = 5
+	// recentDays is the window for recent PR activity across GitHub.
+	recentDays = 30
+	// recentSample is how many recent PRs are examined to count repos.
+	recentSample = 100
 )
+
+// Global is the user's PR activity across all of GitHub, not just this repo.
+type Global struct {
+	AccountCreated time.Time `json:"account_created,omitzero"`
+	AccountAgeDays int       `json:"account_age_days"`
+
+	PRsOpened int `json:"prs_opened"`
+	PRsMerged int `json:"prs_merged"`
+	PRsOpen   int `json:"prs_open"`
+
+	// RecentPRs is PRs opened anywhere in the last recentDays days.
+	RecentPRs int `json:"recent_prs"`
+	// RecentRepos and RecentTopRepo come from the newest RecentSampled of
+	// those PRs.
+	RecentRepos    int    `json:"recent_repos"`
+	RecentTopRepo  string `json:"recent_top_repo,omitempty"`
+	RecentTopCount int    `json:"recent_top_count,omitempty"`
+	RecentSampled  int    `json:"recent_sampled"`
+}
+
+// ClosedUnmerged is PRs closed without merging, anywhere.
+func (g Global) ClosedUnmerged() int {
+	return max(0, g.PRsOpened-g.PRsMerged-g.PRsOpen)
+}
+
+// MergeRate is merged PRs as a fraction of PRs no longer open, anywhere.
+// It returns false if no PRs have been resolved.
+func (g Global) MergeRate() (float64, bool) {
+	resolved := g.PRsMerged + g.ClosedUnmerged()
+	if resolved == 0 {
+		return 0, false
+	}
+	return float64(g.PRsMerged) / float64(resolved), true
+}
+
+// SmoothedMergeRate is MergeRate with one merged and one unmerged PR added,
+// so someone with no history starts at 50% instead of 0% or 100%.
+func (g Global) SmoothedMergeRate() float64 {
+	resolved := g.PRsMerged + g.ClosedUnmerged()
+	return float64(g.PRsMerged+1) / float64(resolved+2)
+}
 
 // MergedPR is a recent merged PR with its rework.
 type MergedPR struct {
@@ -61,6 +106,13 @@ type Metrics struct {
 
 	RecentMerged []MergedPR   `json:"recent_merged,omitempty"`
 	OpenPRs      []searchItem `json:"open_prs,omitempty"`
+
+	Global Global `json:"global"`
+}
+
+// MergedElsewhere is PRs merged in repositories other than this one.
+func (m Metrics) MergedElsewhere() int {
+	return max(0, m.Global.PRsMerged-m.PRsMerged)
 }
 
 // PRsClosedUnmerged is PRs the user opened that were closed without merging.
@@ -159,8 +211,56 @@ func ownedBy(owners []string, c rawCommit) bool {
 	return false
 }
 
-func collect(src source, repo, user string) (Metrics, error) {
+func collectGlobal(src source, acct account, now time.Time, g *Global) error {
+	if !acct.CreatedAt.IsZero() {
+		g.AccountCreated = acct.CreatedAt
+		g.AccountAgeDays = int(now.Sub(acct.CreatedAt).Hours() / 24)
+	}
+
+	prs := "is:pr author:" + acct.Login
+	for _, c := range []struct {
+		dst   *int
+		query string
+	}{
+		{&g.PRsOpened, prs},
+		{&g.PRsMerged, prs + " is:merged"},
+		{&g.PRsOpen, prs + " is:open"},
+	} {
+		n, _, err := src.Search(c.query, "", 1)
+		if err != nil {
+			return err
+		}
+		*c.dst = n
+	}
+
+	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
+	total, items, err := src.Search(prs+" created:>="+since, "desc", recentSample)
+	if err != nil {
+		return err
+	}
+	g.RecentPRs = total
+	g.RecentSampled = len(items)
+
+	perRepo := map[string]int{}
+	for _, it := range items {
+		perRepo[it.Repo]++
+	}
+	g.RecentRepos = len(perRepo)
+	for r, n := range perRepo {
+		// Ties go to the alphabetically first repo so output is stable.
+		if n > g.RecentTopCount || (n == g.RecentTopCount && r < g.RecentTopRepo) {
+			g.RecentTopRepo, g.RecentTopCount = r, n
+		}
+	}
+	return nil
+}
+
+func collect(src source, repo string, acct account, now time.Time) (Metrics, error) {
+	user := acct.Login
 	m := Metrics{User: user, Repo: repo}
+	if err := collectGlobal(src, acct, now, &m.Global); err != nil {
+		return m, err
+	}
 
 	base := "repo:" + repo
 	prs := fmt.Sprintf("%s is:pr author:%s", base, user)

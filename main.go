@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cli/go-gh/v2/pkg/repository"
 )
@@ -97,14 +98,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	login, err := gh.Login(opts.user)
+	acct, err := gh.Account(opts.user)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
 	fullName := repo.Owner + "/" + repo.Name
-	m, err := collect(gh, fullName, login)
+	m, err := collect(gh, fullName, acct, time.Now())
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

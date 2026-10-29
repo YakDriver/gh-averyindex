@@ -63,9 +63,15 @@ A 1,000-line PR where a maintainer deleted 900 lines and added 100 has rework 10
 - Commits with no linked GitHub account count as the author's.
 - If none of the commits are linked to the PR author, the first commit's authors are treated as the contributor (usually the same person on a second account). The report shows "(commits by ...)" when that happens.
 
+## Elsewhere on GitHub
+
+The report also shows the user's PR activity across all of GitHub: account age, PRs opened and merged anywhere, merge rate, and PRs opened in the last 30 days with how many repos they went to. That's what separates a real newcomer from an account spraying PRs across dozens of repos.
+
 ## Score
 
-Each count contributes `weight × log2(1 + count)`, so early contributions matter most and very large counts don't drown out everything else.
+The score has three groups. Each count contributes `weight × log2(1 + count)`, so early contributions matter most and very large counts don't drown out everything else.
+
+**Here** is work in this repository, and it's most of the score.
 
 | Component | Weight |
 |---|---|
@@ -77,6 +83,22 @@ Each count contributes `weight × log2(1 + count)`, so early contributions matte
 | PRs closed unmerged | -3 |
 
 Signals that depend on someone else's judgment (a maintainer merged it without rewriting it, other users upvoted it) weigh more than signals a user produces alone, because they're harder to inflate.
+
+**Elsewhere** gives an established developer some benefit of the doubt in a repo they're new to. It's capped at +20 so it can't substitute for work here.
+
+| Component | Weight |
+|---|---|
+| Account age, in months | 3 |
+| PRs merged in other repositories | 4 |
+
+**Pattern** penalizes opening many PRs that don't land. It's uncapped:
+
+```
+-6 × log2(1 + PRs opened in the last 30 days) × (1 − merge rate)²
+merge rate = (merged + 1) / (resolved + 2)
+```
+
+The squared term means volume alone costs little: 60 PRs a month at a 90% merge rate loses about 1 point, while 106 PRs in 17 days at 8% loses about 32. The +1/+2 smoothing starts someone with no history at 50%, so a first PR barely registers.
 
 | Tier | Score |
 |---|---|
@@ -90,4 +112,6 @@ The weights and tiers in [`score.go`](score.go) are a first guess.
 
 ## Costs
 
-One user takes about 8 search API calls and 2 or more GraphQL queries, about 15 seconds. The search API allows 30 requests per minute.
+One user takes about 12 search API calls and 2 or more GraphQL queries, usually 10 to 15 seconds.
+
+GitHub limits search to 30 requests per minute and also has an unpublished secondary limit that trips when you score several users in a row. When either one hits, the tool prints a line to stderr saying how long it's waiting and until when, then retries (up to 3 times, waiting at most 2 minutes each). If the wait would be longer, it says so and exits.
