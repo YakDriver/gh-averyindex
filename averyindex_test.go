@@ -34,6 +34,8 @@ type fakeSource struct {
 	truncated   bool
 	stars       []int
 	err         error
+
+	thumbsQuery, thumbsAuthor string
 }
 
 func (f *fakeSource) SearchPage(q, order string, page int) (int, []searchItem, error) {
@@ -62,7 +64,8 @@ func (f *fakeSource) MergedPRs(q string, n int) (int, []rawPR, error) {
 	return f.merged, f.prs[:min(n, len(f.prs))], nil
 }
 
-func (f *fakeSource) ThumbsUp(string) (int, bool, error) {
+func (f *fakeSource) ThumbsUp(q, author string) (int, bool, error) {
+	f.thumbsQuery, f.thumbsAuthor = q, author
 	return f.thumbs, f.truncated, nil
 }
 
@@ -88,7 +91,7 @@ func TestCollect(t *testing.T) {
 		search: map[string]fakeSearch{
 			"|" + r + " is:pr author:u":                             {total: 10},
 			"|" + r + " is:issue author:u":                          {total: 4},
-			"|" + r + " commenter:u -author:u":                      {total: 20},
+			"|" + r + " commenter:u -author:u -reviewed-by:u":       {total: 20},
 			"|" + r + " is:pr reviewed-by:u -author:u":              {total: 5},
 			"asc|" + r + " author:u":                                {total: 14, items: []searchItem{first}},
 			"desc|" + r + " author:u":                               {total: 14, items: []searchItem{last}},
@@ -264,6 +267,44 @@ func TestLandingRate(t *testing.T) {
 				t.Errorf("LandingRate() = %.3f, want %.2f to %.2f", got, tt.min, tt.max)
 			}
 		})
+	}
+}
+
+func TestCollectExcludesSelfUpvotes(t *testing.T) {
+	src := &fakeSource{}
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if src.thumbsQuery != "repo:o/r author:u" || src.thumbsAuthor != "u" {
+		t.Errorf("ThumbsUp(%q, %q), want the user's items without the user's own reactions", src.thumbsQuery, src.thumbsAuthor)
+	}
+}
+
+func TestOthersReactions(t *testing.T) {
+	tests := []struct {
+		total  int
+		logins []string
+		want   int
+	}{
+		{3, []string{"a", "b", "c"}, 3},
+		{3, []string{"a", "U", "c"}, 2},
+		// Reactions beyond the sample can't be checked, so they count.
+		{150, []string{"u"}, 149},
+		{1, []string{"u"}, 0},
+		{0, nil, 0},
+	}
+	for _, tt := range tests {
+		if got := othersReactions(tt.total, tt.logins, "u"); got != tt.want {
+			t.Errorf("othersReactions(%d, %v) = %d, want %d", tt.total, tt.logins, got, tt.want)
+		}
+	}
+}
+
+func TestPlural(t *testing.T) {
+	for n, want := range map[int]string{0: "0 PRs", 1: "1 PR", 2: "2 PRs", 1500: "1,500 PRs"} {
+		if got := plural(n, "PR"); got != want {
+			t.Errorf("plural(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
 

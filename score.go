@@ -158,14 +158,14 @@ func flags(m Metrics, r Result) []Flag {
 	}
 	if !g.AccountCreated.IsZero() && g.AccountAgeDays < burstMaxAgeDays &&
 		g.RecentPRs >= burstMinPRs && g.RecentRepos >= burstMinRepos {
-		repos := fmt.Sprintf("%d repos", g.RecentRepos)
+		repos := plural(g.RecentRepos, "repo")
 		if g.RecentSampled < g.RecentPRs {
 			// Repos are counted from a sample, so this is a lower bound.
 			repos = "at least " + repos
 		}
 		fs = append(fs, Flag{flagNewBurst, fmt.Sprintf(
-			"New account: %s old, %s PRs across %s in %d days, %s merged so far",
-			age(g.AccountAgeDays), thousands(g.RecentPRs), repos, recentDays, thousands(g.RecentMerged))})
+			"New account: %s old, %s across %s in %d days, %s merged so far",
+			age(g.AccountAgeDays), plural(g.RecentPRs, "PR"), repos, recentDays, thousands(g.RecentMerged))})
 	}
 	if m.DriveBy() {
 		fs = append(fs, Flag{flagDriveBy, "Drive-by: PRs here, none merged, and no issues, comments, or reviews"})

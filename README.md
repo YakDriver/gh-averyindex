@@ -63,7 +63,7 @@ Run it inside a clone to score against that repository, or pass `-R`. It uses yo
 
 ## What goes into it
 
-**Participation** in this repo: issues opened, other people's threads commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs reviewed, and 👍 reactions on the user's issues and PRs.
+**Participation** in this repo: issues opened, other people's threads commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs reviewed (not also counted as threads), and 👍 reactions other people gave the user's issues and PRs.
 
 **Pull requests** in this repo, with **rework** for recent merged ones: how much of each PR someone else changed before it merged. A PR a maintainer mostly rewrote earns little credit. A CHANGELOG touch-up barely matters.
 
@@ -103,7 +103,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 - **Contributors to own projects** count distinct non-bot accounts, so a user's own automation account registered as a regular user counts once.
 - **Results change over time** as PRs merge and close. Check the timestamp at the end of the report.
 
-Known gaps being worked on: [#6](https://github.com/YakDriver/gh-averyindex/issues/6) (the rework sample is the most recently opened merged PRs, not the most recently merged), [#7](https://github.com/YakDriver/gh-averyindex/issues/7) (self-upvotes count, and reviews also count as threads), [#8](https://github.com/YakDriver/gh-averyindex/issues/8) (bot accounts aren't searched correctly).
+Known gaps being worked on: [#6](https://github.com/YakDriver/gh-averyindex/issues/6) (the rework sample is the most recently opened merged PRs, not the most recently merged), [#8](https://github.com/YakDriver/gh-averyindex/issues/8) (bot accounts aren't searched correctly).
 
 ## Costs
 

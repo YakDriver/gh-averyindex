@@ -133,14 +133,14 @@ type Metrics struct {
 	Issues int `json:"issues"`
 
 	// Threads is the number of other people's issues and PRs the user
-	// commented on. Counting threads instead of comments means fifty "+1"s
-	// on one issue count once.
+	// commented on, not counting PRs they reviewed. Counting threads instead
+	// of comments means fifty "+1"s on one issue count once.
 	Threads int `json:"threads"`
 
 	// Reviews is the number of other people's PRs the user reviewed.
 	Reviews int `json:"reviews"`
 
-	// ThumbsUp is 👍 reactions received on the user's issues and PRs.
+	// ThumbsUp is 👍 reactions other people gave the user's issues and PRs.
 	ThumbsUp          int  `json:"thumbs_up"`
 	ThumbsUpTruncated bool `json:"thumbs_up_truncated,omitempty"`
 
@@ -389,7 +389,9 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	}{
 		{&m.PRsOpened, prs},
 		{&m.Issues, fmt.Sprintf("%s is:issue author:%s", base, user)},
-		{&m.Threads, fmt.Sprintf("%s commenter:%s -author:%s", base, user, user)},
+		// PRs the user reviewed count under Reviews, so they're left out
+		// here to avoid counting the same work twice.
+		{&m.Threads, fmt.Sprintf("%s commenter:%s -author:%s -reviewed-by:%s", base, user, user, user)},
 		{&m.Reviews, fmt.Sprintf("%s is:pr reviewed-by:%s -author:%s", base, user, user)},
 	} {
 		if err := count(c.dst, c.query); err != nil {
@@ -414,7 +416,7 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	}
 
 	var err error
-	if m.ThumbsUp, m.ThumbsUpTruncated, err = src.ThumbsUp(authored); err != nil {
+	if m.ThumbsUp, m.ThumbsUpTruncated, err = src.ThumbsUp(authored, user); err != nil {
 		return m, err
 	}
 
