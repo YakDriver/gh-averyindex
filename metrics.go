@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +24,22 @@ const (
 	// contributorSample is how many merged PRs in the user's own repos are
 	// examined to count distinct contributors.
 	contributorSample = 100
+
+	// Spray looks at the newest spraySample PRs opened from sprayDays ago
+	// until the recent window starts, so it never counts the PRs that
+	// not-landing already does.
+	sprayDays   = 180
+	spraySample = 100
+	// acceptedSample is how many PRs merged elsewhere are checked for who
+	// accepted them.
+	acceptedSample = 100
+
+	// A merged PR here had heavy maintainer involvement when it drew
+	// heavyMinThreads review threads and others made heavyMinCommits
+	// commits on it. Discussion alone doesn't count: an author who works
+	// through a long review makes the commits themselves.
+	heavyMinThreads = 20
+	heavyMinCommits = 10
 )
 
 // Global is the user's PR activity across GitHub. It covers public
@@ -61,6 +79,33 @@ type Global struct {
 	RecentTopRepo  string `json:"recent_top_repo,omitempty"`
 	RecentTopCount int    `json:"recent_top_count,omitempty"`
 	RecentSampled  int    `json:"recent_sampled"`
+
+	// SprayRepos is how many repos, among the newest SpraySampled PRs opened
+	// 31 to 180 days ago, got a PR that was closed unmerged and none that
+	// merged. PRs still open don't count.
+	SprayRepos   int `json:"spray_repos"`
+	SpraySampled int `json:"spray_sampled"`
+
+	// AcceptedElsewhere is how many of the newest AcceptedSampled PRs merged
+	// elsewhere someone else merged or approved. Merging your own PR
+	// without anyone's approval shows nothing about what others think of it.
+	AcceptedElsewhere int `json:"accepted_elsewhere"`
+	AcceptedSampled   int `json:"accepted_sampled"`
+}
+
+// AcceptedShare is the fraction of sampled PRs merged elsewhere that someone
+// else merged or approved, or 1 when none were sampled.
+func (g Global) AcceptedShare() float64 {
+	if g.AcceptedSampled == 0 {
+		return 1
+	}
+	return float64(g.AcceptedElsewhere) / float64(g.AcceptedSampled)
+}
+
+// AcceptedMergedElsewhere is PRs merged elsewhere, weighted by the share
+// that others accepted.
+func (g Global) AcceptedMergedElsewhere() float64 {
+	return float64(g.MergedElsewhere) * g.AcceptedShare()
 }
 
 // ClosedUnmerged is PRs closed without merging, anywhere.
@@ -121,6 +166,17 @@ type MergedPR struct {
 	CommitsTruncated bool     `json:"commits_truncated,omitempty"`
 }
 
+// HeavyPR is a merged PR that drew a long review and many commits from
+// others. It earns no code credit.
+type HeavyPR struct {
+	Number            int `json:"number"`
+	ReviewThreads     int `json:"review_threads"`
+	MaintainerCommits int `json:"maintainer_commits"`
+	// CommitsTruncated is set when the PR has more commits than were read,
+	// so MaintainerCommits counts only the last maxCommits.
+	CommitsTruncated bool `json:"commits_truncated,omitempty"`
+}
+
 // Metrics are the raw counts for one user in one repository.
 type Metrics struct {
 	User string `json:"user"`
@@ -149,8 +205,12 @@ type Metrics struct {
 	FirstAuthored *searchItem `json:"first_authored,omitempty"`
 	LastAuthored  *searchItem `json:"last_authored,omitempty"`
 
-	RecentMerged []MergedPR   `json:"recent_merged,omitempty"`
-	OpenPRs      []searchItem `json:"open_prs,omitempty"`
+	RecentMerged []MergedPR `json:"recent_merged,omitempty"`
+	HeavyPRs     []HeavyPR  `json:"heavy_prs,omitempty"`
+	// HeavyUnchecked is set when the check for heavy maintainer
+	// involvement failed, so the report is missing it.
+	HeavyUnchecked bool         `json:"heavy_unchecked,omitempty"`
+	OpenPRs        []searchItem `json:"open_prs,omitempty"`
 
 	Global Global `json:"global"`
 }
@@ -175,21 +235,46 @@ func (m Metrics) DriveBy() bool {
 }
 
 // AvgCredit is the average credit across the recent merged PRs checked for
-// rework, or 1 if none were checked.
+// rework, leaving out heavy PRs, which earn nothing on their own. It's 1 if
+// none are left.
 func (m Metrics) AvgCredit() float64 {
-	if len(m.RecentMerged) == 0 {
+	var sum float64
+	var n int
+	for _, pr := range m.RecentMerged {
+		if !m.heavy(pr.Number) {
+			sum += pr.Credit
+			n++
+		}
+	}
+	if n == 0 {
 		return 1
 	}
-	var sum float64
-	for _, pr := range m.RecentMerged {
-		sum += pr.Credit
-	}
-	return sum / float64(len(m.RecentMerged))
+	return sum / float64(n)
 }
 
-// CodeCredit is merged PRs discounted by the average rework on recent ones.
+func (m Metrics) heavy(number int) bool {
+	_, ok := m.heavyPR(number)
+	return ok
+}
+
+func (m Metrics) heavyPR(number int) (HeavyPR, bool) {
+	i := slices.IndexFunc(m.HeavyPRs, func(h HeavyPR) bool { return h.Number == number })
+	if i < 0 {
+		return HeavyPR{}, false
+	}
+	return m.HeavyPRs[i], true
+}
+
+// recent reports whether number is one of the recent merged PRs checked for
+// rework.
+func (m Metrics) recent(number int) bool {
+	return slices.ContainsFunc(m.RecentMerged, func(pr MergedPR) bool { return pr.Number == number })
+}
+
+// CodeCredit is merged PRs other than heavy ones, discounted by the average
+// rework on recent ones.
 func (m Metrics) CodeCredit() float64 {
-	return float64(m.PRsMerged) * m.AvgCredit()
+	return float64(max(0, m.PRsMerged-len(m.HeavyPRs))) * m.AvgCredit()
 }
 
 // rework compares lines other people changed on a PR with lines its author
@@ -201,18 +286,9 @@ func (m Metrics) CodeCredit() float64 {
 // to be the contributor (often the same person under a second account, such
 // as a work email) and returned as inferred.
 func rework(user string, pr rawPR) (rework, credit float64, inferred []string) {
-	var commits []rawCommit
-	for _, c := range pr.Commits {
-		if !c.Merge {
-			commits = append(commits, c)
-		}
-	}
+	commits := nonMerge(pr.Commits)
 
-	owners := []string{user}
-	if !slices.ContainsFunc(commits, func(c rawCommit) bool { return ownedBy(owners, c) }) && len(commits) > 0 {
-		owners = commits[0].Logins
-		inferred = owners
-	}
+	owners, inferred := prOwners(user, commits)
 
 	var own, ownChurn, other int
 	for _, c := range commits {
@@ -237,6 +313,82 @@ func rework(user string, pr rawPR) (rework, credit float64, inferred []string) {
 	}
 	rework = float64(other) / float64(denom)
 	return rework, 1 - min(1, rework), inferred
+}
+
+// nonMerge drops merge commits, which carry the base branch's changes.
+func nonMerge(commits []rawCommit) []rawCommit {
+	var out []rawCommit
+	for _, c := range commits {
+		if !c.Merge {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// prOwners is who counts as the PR's contributor: the user, or, if no commit
+// is linked to them, the first commit's authors (returned as inferred).
+func prOwners(user string, commits []rawCommit) (owners, inferred []string) {
+	owners = []string{user}
+	if !slices.ContainsFunc(commits, func(c rawCommit) bool { return ownedBy(owners, c) }) && len(commits) > 0 {
+		owners = commits[0].Logins
+		inferred = owners
+	}
+	return owners, inferred
+}
+
+// maintainerCommits counts non-merge commits on a PR made by someone other
+// than its contributor. Bot commits, such as generated changelog entries,
+// don't count.
+func maintainerCommits(user string, pr rawPR) int {
+	commits := nonMerge(pr.Commits)
+	owners, _ := prOwners(user, commits)
+	n := 0
+	for _, c := range commits {
+		if !ownedBy(owners, c) && !slices.ContainsFunc(c.Logins, isBotLogin) {
+			n++
+		}
+	}
+	return n
+}
+
+func isBotLogin(login string) bool {
+	return strings.HasSuffix(login, "[bot]")
+}
+
+// sprayRepos counts repos where a sampled PR was closed unmerged and none
+// merged.
+func sprayRepos(items []searchItem) int {
+	merged, closed := map[string]bool{}, map[string]bool{}
+	for _, it := range items {
+		switch it.State {
+		case "MERGED":
+			merged[it.Repo] = true
+		case "CLOSED":
+			closed[it.Repo] = true
+		}
+	}
+	n := 0
+	for r := range closed {
+		if !merged[r] {
+			n++
+		}
+	}
+	return n
+}
+
+// acceptedByOthers counts merged PRs that someone besides user merged or
+// approved. Bot merges count: bots like Prow and merge queues merge after
+// people review, often by label rather than GitHub approval. A merger
+// whose account was deleted counts too, since it can't be the user.
+func acceptedByOthers(user string, items []searchItem) int {
+	n := 0
+	for _, it := range items {
+		if it.Approvals > 0 || !strings.EqualFold(it.MergedBy, user) {
+			n++
+		}
+	}
+	return n
 }
 
 func ownedBy(owners []string, c rawCommit) bool {
@@ -282,10 +434,36 @@ func (b *batch) items(total *int, items *[]searchItem, query, order string, n in
 	})
 }
 
-// result adds a search whose whole result, including its cursor, goes in dst.
+// result adds a search whose whole result goes in dst.
 func (b *batch) result(dst *searchResult, query, order string, n int) {
 	b.reqs = append(b.reqs, searchReq{Query: query, Order: order, N: n})
 	b.sets = append(b.sets, func(r searchResult) { *dst = r })
+}
+
+// extra adds a newest-first search that returns more about each PR.
+func (b *batch) extra(dst *searchResult, e extra, query string, n int) {
+	b.reqs = append(b.reqs, searchReq{Query: query, Order: "desc", N: n, Extra: e})
+	b.sets = append(b.sets, func(r searchResult) { *dst = r })
+}
+
+// split makes a batch of each search.
+func (b *batch) split() []batch {
+	var out []batch
+	for i := range b.reqs {
+		out = append(out, batch{reqs: b.reqs[i : i+1], sets: b.sets[i : i+1]})
+	}
+	return out
+}
+
+// runAll sends the batches at once and returns the first error.
+func runAll(src source, batches []batch) error {
+	errs := make([]error, len(batches))
+	var wg sync.WaitGroup
+	for i := range batches {
+		wg.Go(func() { errs[i] = batches[i].run(src) })
+	}
+	wg.Wait()
+	return cmp.Or(errs...)
 }
 
 func (b *batch) run(src source) error {
@@ -328,6 +506,17 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.count(&g.RecentMerged, recent+" is:merged")
 	b.count(&g.RecentClosedUnmerged, recent+" is:closed is:unmerged")
 
+	// The searches with extras are sent separately, alongside the main
+	// batch. Together, GitHub can time out or exceed its resource limits on
+	// a prolific user.
+	var bx batch
+	sprayFrom := now.AddDate(0, 0, -sprayDays).Format(time.DateOnly)
+	sprayTo := now.AddDate(0, 0, -recentDays-1).Format(time.DateOnly)
+	var sprayed searchResult
+	bx.extra(&sprayed, extraState, global+" created:"+sprayFrom+".."+sprayTo, spraySample)
+	var merged searchResult
+	bx.extra(&merged, extraAccepted, global+" is:merged -repo:"+repo, acceptedSample)
+
 	var contributorTotal int
 	var contributorItems []searchItem
 	b.items(&contributorTotal, &contributorItems,
@@ -348,7 +537,7 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.items(nil, &last, authored, "desc", 1)
 	b.items(&m.PRsOpen, &m.OpenPRs, prs+" is:open", "desc", openPRList)
 
-	if err := b.run(src); err != nil {
+	if err := runAll(src, append([]batch{b}, bx.split()...)); err != nil {
 		return m, err
 	}
 	if len(first) > 0 {
@@ -359,9 +548,9 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	}
 
 	g.RecentPRs = recentFirst.Total
-	if err := countRecentRepos(src, recent, recentFirst, g); err != nil {
-		return m, err
-	}
+	countRecentRepos(recentFirst.Items, g)
+	g.SpraySampled, g.SprayRepos = len(sprayed.Items), sprayRepos(sprayed.Items)
+	g.AcceptedSampled, g.AcceptedElsewhere = len(merged.Items), acceptedByOthers(user, merged.Items)
 	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
 		return m, err
 	}
@@ -374,7 +563,18 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	if m.PRsOpened == 0 {
 		return m, nil
 	}
-	total, raw, err := src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
+	// Rework and heavy review use the same PRs but no shared results, so
+	// they're fetched together.
+	var (
+		total     int
+		raw       []rawPR
+		reviewed  []rawPR
+		reviewErr error
+		wg        sync.WaitGroup
+	)
+	wg.Go(func() { reviewed, reviewErr = src.ReviewedPRs(repo, prs+" is:merged", heavyMinThreads) })
+	total, raw, err = src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
+	wg.Wait()
 	if err != nil {
 		return m, err
 	}
@@ -392,33 +592,27 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 			CommitsTruncated: pr.CommitsTruncated,
 		})
 	}
+	// A failed heavy check leaves the rest of the report useful, so it's
+	// reported as missing instead of failing the run.
+	if reviewErr != nil {
+		fmt.Fprintf(notices, "Couldn't check merged PRs for heavy maintainer involvement: %v\n", reviewErr)
+		m.HeavyUnchecked = true
+		return m, nil
+	}
+	for _, pr := range reviewed {
+		if n := maintainerCommits(user, pr); n >= heavyMinCommits {
+			m.HeavyPRs = append(m.HeavyPRs, HeavyPR{Number: pr.Number, ReviewThreads: pr.ReviewThreads,
+				MaintainerCommits: n, CommitsTruncated: pr.CommitsTruncated})
+		}
+	}
 	return m, nil
 }
 
-// countRecentRepos counts the repos the user's recent PRs went to, starting
-// from the first page of results.
-func countRecentRepos(src source, recent string, page searchResult, g *Global) error {
-	items := page.Items
+// countRecentRepos counts the repos the user's newest recent PRs went to.
+func countRecentRepos(items []searchItem, g *Global) {
 	perRepo := map[string]int{}
 	for _, it := range items {
 		perRepo[it.Repo]++
-	}
-	// The first page can miss repos when the newest PRs all went to a few of
-	// them. Keep reading until there are enough repos to decide the
-	// new-account flag or the results run out. GitHub search stops at 1,000.
-	for len(perRepo) < burstMinRepos && page.HasNext && len(items) < searchResultLimit {
-		next, err := src.SearchNext(recent, "desc", page.EndCursor)
-		if err != nil {
-			return err
-		}
-		if len(next.Items) == 0 {
-			break
-		}
-		page = next
-		items = append(items, next.Items...)
-		for _, it := range next.Items {
-			perRepo[it.Repo]++
-		}
 	}
 	g.RecentSampled = len(items)
 	g.RecentRepos = len(perRepo)
@@ -428,7 +622,6 @@ func countRecentRepos(src source, recent string, page searchResult, g *Global) e
 			g.RecentTopRepo, g.RecentTopCount = r, n
 		}
 	}
-	return nil
 }
 
 // collectProjects scores what other people do with the user's own repos.

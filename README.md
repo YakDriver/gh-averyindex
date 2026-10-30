@@ -69,11 +69,11 @@ Otherwise, run it inside a clone to score against that repository, or pass `-R`.
 
 **Participation** in this repo: issues opened, other people's threads commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs reviewed (not also counted as threads), and 👍 reactions other people gave the user's issues and PRs.
 
-**Pull requests** in this repo, with **rework** for recent merged ones: how much of each PR someone else changed before it merged. A PR a maintainer mostly rewrote earns little credit. A CHANGELOG touch-up barely matters.
+**Pull requests** in this repo, with **rework** for recent merged ones: how much of each PR someone else changed before it merged. A PR a maintainer mostly rewrote earns little credit. A CHANGELOG touch-up barely matters. A merged PR with a long review (20+ review threads) and 10 or more commits by others had **heavy maintainer involvement** and earns no credit. A long review the author worked through alone doesn't count.
 
-**Elsewhere on GitHub**: account age, PRs merged in other people's public repos, and what other people do with the user's own projects (stars and outside contributors). PRs a user merges into their own repos don't count, since nobody else judged them. This gives an established developer some benefit of the doubt in a repo they're new to, and it's capped so it can't stand in for work here.
+**Elsewhere on GitHub**: account age, PRs merged in other people's public repos, and what other people do with the user's own projects (stars and outside contributors). PRs a user merges into their own repos don't count, since nobody else judged them. Elsewhere, merged PRs count by the share someone else merged or approved, so merging your own PRs without review counts for less. Merges by bots such as Prow count, since they follow review. This gives an established developer some benefit of the doubt in a repo they're new to, and it's capped so it can't stand in for work here.
 
-**Pattern**: a penalty for opening many PRs that don't land. It weighs the last 30 days against the user's longer history, so a long record cushions a bad month without hiding a burst of rejected PRs. PRs still waiting for review don't count against anyone.
+**Pattern**: penalties for opening PRs that don't land. One weighs the last 30 days against the user's longer history, so a long record cushions a bad month without hiding a burst of rejected PRs. The other covers the 150 days before that: it counts repos where a PR was closed unmerged and none merged. A few cost almost nothing, 20 cost about 7 points, and it tops out near 15. The two cover different PRs, so none counts twice. PRs still waiting for review don't count against anyone.
 
 Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. The score maps to a tier: Novice, Contributor, Regular, Veteran, or Core. Exact weights are in the code.
 
@@ -84,24 +84,25 @@ Flags appear under the header line when something deserves a closer look. They s
 | Flag | When |
 |---|---|
 | Recent PRs mostly not landing | The Pattern penalty outweighs everything else, and fewer than half of the user's recently resolved PRs merged |
-| New account | A new account opened many PRs across many repos in the last 30 days, even if none have been closed yet |
 | Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
+| Heavy maintainer involvement | A merged PR here had a long review and many commits by others |
 
 ```console
-hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  ➜ averyindex -26
-  ⚠ Recent PRs mostly not landing: 3 of 26 resolved merged in 30 days
-  ⚠ New account: 17 days old, 109 PRs across 23 repos in 30 days, 3 merged so far
+hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  ➜ averyindex -17
+  ⚠ Recent PRs mostly not landing: 7 of 34 resolved merged in 30 days
   ⚠ Drive-by: PRs here, none merged, and no issues, comments, or reviews
 ```
 
-A new account can be legitimate, for example someone doing Hacktoberfest. The flag includes how many PRs merged so a maintainer can judge. `--json` lists flags in a `flags` array with a stable `code` for each.
+Flags are for yes-or-no facts. Spreading PRs across many repos is a matter of degree, so it's a line in the score instead of a flag. `--json` lists flags in a `flags` array with a stable `code` for each. Why the score works the way it does: [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/tuning.md](docs/design/tuning.md).
 
 ## Limits
 
 - **Only GitHub.** Work on other forges, mailing lists, or inside companies isn't visible.
 - **Private repositories are excluded** from everything outside the scored repo.
-- **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control.
-- **Search returns at most 1,000 results.** Upvotes received and the repo count for recent PRs can be partial. The report says so when they are.
+- **Organization repos count as elsewhere.** Excluding a user's own repos doesn't cover repos owned by an organization they control. Self-merged PRs without approval count for less, which covers most of that.
+- **Search returns at most 1,000 results.** Upvotes received can be partial, and the report says so when they are.
+- **Samples of 100.** Repo counts come from the newest 100 PRs in each window, and acceptance from the newest 100 PRs merged elsewhere. Heavy maintainer involvement is checked on the 100 most recently updated merged PRs here, reading the last 100 commits of the 10 most discussed. The spray count can be off in either direction when a repo's merged or closed PRs fall outside the sample.
+- **A brand-new account with only open PRs** gets no spray line, since spray starts at day 31. The "Last 30 days" line shows its age, PR count, and repos.
 - **Rework is sampled** from the 5 most recently merged PRs (picked from the 25 most recently updated, since search can't sort by merge date), and from the first 100 commits of each. When none of a PR's commits are linked to its author, the first commit's authors are assumed to be the contributor, and the report says "(commits by ...)".
 - **Self-upvotes are checked among the 10 oldest 👍 on each issue or PR.** Someone who upvotes their own issue usually does it first.
 - **"First authored" ignores comments.** It's the user's oldest issue or PR in the repo.
@@ -111,7 +112,7 @@ A new account can be legitimate, for example someone doing Hacktoberfest. The fl
 
 ## Costs
 
-All of a user's searches go to GitHub in one GraphQL request, plus a few smaller requests for reactions, rework, and the user's own repos. A run usually takes about 5 seconds, and longer for someone with thousands of issues and PRs in the repo. It costs a few GraphQL points out of 5,000 per hour. Searches, including any extra pages, all go through GraphQL rather than the REST search API and its limit of 30 requests per minute, so scoring several people in a row normally doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
+A user's searches go to GitHub as one GraphQL request. Two searches that need more detail per PR go out as separate requests at the same time, because combining them with the rest can exceed GitHub's limits for a prolific user. A few more requests cover reactions, rework, long reviews, and the user's own repos. A run usually takes 6 to 15 seconds, and longer for someone with thousands of issues and PRs in the repo. It costs a few GraphQL points out of 5,000 per hour. Searches all go through GraphQL rather than the REST search API and its limit of 30 requests per minute, so scoring several people in a row normally doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
 
 If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 

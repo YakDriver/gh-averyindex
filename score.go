@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"slices"
 )
 
 // The score has three groups:
@@ -11,7 +12,8 @@ import (
 //   - Elsewhere: account age and PRs merged in other repositories. This gives
 //     an established developer some benefit of the doubt in a repo they're new
 //     to. It's capped so it can't substitute for work here.
-//   - Pattern: a penalty for opening many PRs that don't land. It's uncapped.
+//   - Pattern: penalties for opening many PRs that don't land, in the last
+//     30 days and across repos over the 150 days before that. It's uncapped.
 const (
 	groupHere      = "Here"
 	groupElsewhere = "Elsewhere"
@@ -49,6 +51,13 @@ type Weights struct {
 	// 30 days) and by (1 - landing rate)², so it only bites when volume is
 	// high and PRs aren't landing. See Global.LandingRate.
 	NotLanding float64
+	// Spray is a logistic curve in the number of repos where PRs were
+	// closed without landing: about SprayMax/2 at SprayMid repos, with
+	// SpraySteep setting how quickly it rises. A few such repos cost almost
+	// nothing, and it can't exceed SprayMax however wide the spray.
+	SprayMax   float64
+	SprayMid   float64
+	SpraySteep float64
 }
 
 var defaultWeights = Weights{
@@ -66,6 +75,16 @@ var defaultWeights = Weights{
 	ElsewhereCap:    20,
 
 	NotLanding: -6,
+
+	SprayMax:   -15,
+	SprayMid:   20,
+	SpraySteep: 4,
+}
+
+// sprayPoints is the spray penalty for n repos, shifted so 0 repos is 0.
+func sprayPoints(n int, w Weights) float64 {
+	curve := func(x float64) float64 { return w.SprayMax / (1 + math.Exp(-(x-w.SprayMid)/w.SpraySteep)) }
+	return curve(float64(n)) - curve(0)
 }
 
 // tiers are minimum scores for each tier, highest first. Anything below the
@@ -115,8 +134,8 @@ type Flag struct {
 
 const (
 	flagNotLanding = "not-landing"
-	flagNewBurst   = "new-account-burst"
 	flagDriveBy    = "drive-by"
+	flagHeavy      = "heavy-maintainer-involvement"
 )
 
 const (
@@ -127,14 +146,8 @@ const (
 	// notLandingMinResolved is how many recent PRs must have resolved before
 	// the flag can say they mostly didn't land. The penalty can be large with
 	// nothing resolved (the 50% prior times high volume), but then there's no
-	// recent outcome to report; the new-account flag covers that case.
+	// recent outcome to report, and the breakdown shows the penalty.
 	notLandingMinResolved = 5
-
-	// A new account opening many PRs across many repos is flagged even
-	// before any are closed.
-	burstMaxAgeDays = 90
-	burstMinPRs     = 20
-	burstMinRepos   = 10
 )
 
 func flags(m Metrics, r Result) []Flag {
@@ -156,19 +169,15 @@ func flags(m Metrics, r Result) []Flag {
 			"Recent PRs mostly not landing: %s of %s resolved merged in %d days",
 			thousands(g.RecentMerged), thousands(resolved), recentDays)})
 	}
-	if !g.AccountCreated.IsZero() && g.AccountAgeDays < burstMaxAgeDays &&
-		g.RecentPRs >= burstMinPRs && g.RecentRepos >= burstMinRepos {
-		repos := plural(g.RecentRepos, "repo")
-		if g.RecentSampled < g.RecentPRs {
-			// Repos are counted from a sample, so this is a lower bound.
-			repos = "at least " + repos
-		}
-		fs = append(fs, Flag{flagNewBurst, fmt.Sprintf(
-			"New account: %s old, %s across %s in %d days, %s merged so far",
-			age(g.AccountAgeDays), plural(g.RecentPRs, "PR"), repos, recentDays, thousands(g.RecentMerged))})
-	}
 	if m.DriveBy() {
 		fs = append(fs, Flag{flagDriveBy, "Drive-by: PRs here, none merged, and no issues, comments, or reviews"})
+	}
+	if len(m.HeavyPRs) > 0 {
+		worst := slices.MaxFunc(m.HeavyPRs, func(a, b HeavyPR) int { return a.MaintainerCommits - b.MaintainerCommits })
+		fs = append(fs, Flag{flagHeavy, fmt.Sprintf(
+			"Heavy maintainer involvement on %s (#%d: %s, %s by others)",
+			plural(len(m.HeavyPRs), "merged PR"), worst.Number,
+			plural(worst.ReviewThreads, "review thread"), plural(worst.MaintainerCommits, "commit"))})
 	}
 	return fs
 }
@@ -187,7 +196,7 @@ func score(m Metrics, w Weights) Result {
 	months := float64(g.AccountAgeDays) / daysPerMonth
 
 	here := []Component{
-		{Label: "Code credit", Detail: fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit()),
+		{Label: "Code credit", Detail: codeCreditDetail(m),
 			Count: m.CodeCredit(), Points: points(m.CodeCredit(), w.Code)},
 		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: points(float64(m.ThumbsUp), w.ThumbsUp)},
 		{Label: "PRs reviewed", Count: float64(m.Reviews), Points: points(float64(m.Reviews), w.Reviews)},
@@ -199,8 +208,8 @@ func score(m Metrics, w Weights) Result {
 
 	elsewhere := []Component{
 		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge)},
-		{Label: "PRs merged elsewhere", Count: float64(g.MergedElsewhere),
-			Points: points(float64(g.MergedElsewhere), w.MergedElsewhere)},
+		{Label: "PRs merged elsewhere", Detail: acceptedDetail(g), Count: g.AcceptedMergedElsewhere(),
+			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere)},
 		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),
 			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars)},
 		{Label: "Contributors to own projects", Count: float64(g.Contributors),
@@ -237,7 +246,12 @@ func score(m Metrics, w Weights) Result {
 	}{
 		{groupHere, here},
 		{groupElsewhere, elsewhere},
-		{groupPattern, []Component{notLanding}},
+		{groupPattern, []Component{notLanding, {
+			Label:  "PRs closed unmerged in repos",
+			Detail: fmt.Sprintf("days %d to %d · from %s", recentDays+1, sprayDays, plural(g.SpraySampled, "PR")),
+			Count:  float64(g.SprayRepos),
+			Points: sprayPoints(g.SprayRepos, w),
+		}}},
 	} {
 		for _, c := range grp.parts {
 			c.Group = grp.name
@@ -249,6 +263,20 @@ func score(m Metrics, w Weights) Result {
 	r.Tier = tierFor(r.Score)
 	r.Flags = flags(m, r)
 	return r
+}
+
+func codeCreditDetail(m Metrics) string {
+	if len(m.HeavyPRs) == 0 {
+		return fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit())
+	}
+	return fmt.Sprintf("%s merged, %d heavy, others × %.2f", thousands(m.PRsMerged), len(m.HeavyPRs), m.AvgCredit())
+}
+
+func acceptedDetail(g Global) string {
+	if g.AcceptedSampled == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s merged · %.0f%% accepted by others", thousands(g.MergedElsewhere), g.AcceptedShare()*100)
 }
 
 // age describes an account age in days, months, or years.

@@ -124,12 +124,30 @@ func renderGlobal(w io.Writer, g Global) {
 		{"PRs opened", fmt.Sprintf("%s · %s merged · %s open · %s closed unmerged",
 			thousands(g.PRsOpened), thousands(g.PRsMerged), thousands(g.PRsOpen), thousands(g.ClosedUnmerged()))},
 		{"Merge rate", rate},
+		{"Accepted", accepted(g)},
 		{"Own projects", projects(g)},
 		{fmt.Sprintf("Last %d days", recentDays), recent},
+		{fmt.Sprintf("Days %d to %d", recentDays+1, sprayDays), spray(g)},
 	} {
 		fmt.Fprintf(tw, "  %s\t%s\n", row[0], row[1])
 	}
 	tw.Flush()
+}
+
+func accepted(g Global) string {
+	if g.AcceptedSampled == 0 {
+		return "no merged PRs to check"
+	}
+	return fmt.Sprintf("%s of the newest %s merged or approved by someone else",
+		thousands(g.AcceptedElsewhere), plural(g.AcceptedSampled, "merged PR"))
+}
+
+func spray(g Global) string {
+	if g.SpraySampled == 0 {
+		return "no PRs"
+	}
+	return fmt.Sprintf("closed unmerged in %s with nothing merged (from the newest %s)",
+		plural(g.SprayRepos, "repo"), plural(g.SpraySampled, "PR"))
 }
 
 func projects(g Global) string {
@@ -174,9 +192,21 @@ func renderPRs(w io.Writer, m Metrics) error {
 		if pr.CommitsTruncated {
 			note += fmt.Sprintf("  (first %d commits)", maxCommits)
 		}
-		fmt.Fprintf(tw, "  #%d\tmerged %s\t+%s -%s\trework %3.0f%%\tcredit %.2f%s\n",
+		// A heavy PR earns nothing, whatever its line rework says.
+		credit := fmt.Sprintf("%.2f", pr.Credit)
+		if h, ok := m.heavyPR(pr.Number); ok {
+			credit = "0"
+			note += "  " + heavyNote(h)
+		}
+		fmt.Fprintf(tw, "  #%d\tmerged %s\t+%s -%s\trework %3.0f%%\tcredit %s%s\n",
 			pr.Number, date(pr.MergedAt), thousands(pr.Additions), thousands(pr.Deletions),
-			pr.Rework*100, pr.Credit, note)
+			pr.Rework*100, credit, note)
+	}
+	for _, pr := range m.HeavyPRs {
+		if m.recent(pr.Number) {
+			continue // already listed with its rework
+		}
+		fmt.Fprintf(tw, "  #%d\theavy\tcredit 0  %s\n", pr.Number, heavyNote(pr))
 	}
 	for _, pr := range m.OpenPRs {
 		fmt.Fprintf(tw, "  #%d\topen since %s\n", pr.Number, date(pr.CreatedAt))
@@ -190,7 +220,20 @@ func renderPRs(w io.Writer, m Metrics) error {
 	if m.PRsMerged > len(m.RecentMerged) && len(m.RecentMerged) > 0 {
 		fmt.Fprintf(w, "  Rework checked on the %d most recent merged PRs.\n", len(m.RecentMerged))
 	}
+	if m.HeavyUnchecked {
+		fmt.Fprintln(w, "  Heavy maintainer involvement wasn't checked: GitHub returned an error.")
+	} else if m.PRsMerged > heavyCandidates {
+		fmt.Fprintf(w, "  Heavy review checked on the %d most recently updated merged PRs.\n", heavyCandidates)
+	}
 	return nil
+}
+
+func heavyNote(h HeavyPR) string {
+	commits := plural(h.MaintainerCommits, "commit") + " by others"
+	if h.CommitsTruncated {
+		commits += fmt.Sprintf(" in the last %d", maxCommits)
+	}
+	return fmt.Sprintf("(heavy: %s, %s)", plural(h.ReviewThreads, "review thread"), commits)
 }
 
 func renderJSON(w io.Writer, m Metrics, r Result, md meta) error {
