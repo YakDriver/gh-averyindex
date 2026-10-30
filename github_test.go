@@ -156,7 +156,7 @@ func TestSearchManyOneRequest(t *testing.T) {
 		if !strings.Contains(query, "s0: search(query: $q0, type: ISSUE, first: 0) { issueCount }") {
 			t.Errorf("count search should ask for no nodes:\n%s", query)
 		}
-		if !strings.Contains(query, "s2: search(query: $q2, type: ISSUE, first: 100) { issueCount pageInfo { hasNextPage endCursor } nodes") {
+		if !strings.Contains(query, "s2: search(query: $q2, type: ISSUE, first: 100) { issueCount nodes") {
 			t.Errorf("item search should be capped at 100 per page:\n%s", query)
 		}
 		// Aliases come back in a different order than they were sent.
@@ -203,7 +203,7 @@ func TestSearchManyOneRequest(t *testing.T) {
 func TestSearchManyCountsOnly(t *testing.T) {
 	// Copilot on #27: GraphQL rejects a fragment that isn't used.
 	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
-		if strings.Contains(query, "fragment") || strings.Contains(query, "pageInfo") {
+		if strings.Contains(query, "fragment") || strings.Contains(query, "nodes") {
 			t.Errorf("count-only batch includes item fields:\n%s", query)
 		}
 		return `{"data":{"s0":{"issueCount":4},"s1":{"issueCount":0}}}`
@@ -214,21 +214,82 @@ func TestSearchManyCountsOnly(t *testing.T) {
 	}
 }
 
-func TestSearchNext(t *testing.T) {
-	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
-		if vars["q"] != "is:pr author:u sort:created-desc" || vars["cursor"] != "c1" {
-			t.Errorf("vars = %v", vars)
+func TestSearchManyExtras(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
+		for _, want := range []string{"s0: search(query: $q0, type: ISSUE, first: 1) { issueCount nodes { __typename ...item } }",
+			"s1: search(query: $q1, type: ISSUE, first: 2) { issueCount nodes { __typename ...accepted } }",
+			"s2: search(query: $q2, type: ISSUE, first: 2) { issueCount nodes { __typename ...state } }",
+			"fragment item on SearchResultItem", "fragment accepted on SearchResultItem", "fragment state on SearchResultItem",
+			"reviews(states: APPROVED) { totalCount }"} {
+			if !strings.Contains(query, want) {
+				t.Errorf("query missing %q:\n%s", want, query)
+			}
 		}
-		if !strings.Contains(query, "after: $cursor") || !strings.Contains(query, "fragment item") {
-			t.Errorf("query:\n%s", query)
-		}
-		return `{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":false,"endCursor":"c2"},
-			"nodes":[{"__typename":"PullRequest","number":3,"createdAt":"2026-10-01T00:00:00Z",
-			"repository":{"nameWithOwner":"x/y"},"author":{"login":"u","__typename":"User"}}]}}}`
+		return `{"data":{"s0":{"issueCount":1,"nodes":[]},"s2":{"issueCount":0,"nodes":[]},"s1":{"issueCount":2,"nodes":[
+			{"__typename":"PullRequest","number":1,"repository":{"nameWithOwner":"a/b"},"state":"MERGED",
+			 "mergedBy":{"login":"m"},"reviews":{"totalCount":2}},
+			{"__typename":"PullRequest","number":2,"repository":{"nameWithOwner":"a/b"},"state":"CLOSED",
+			 "mergedBy":null,"reviews":{"totalCount":0}}]}}}`
 	}).client(t)
-	r, err := gh.SearchNext("is:pr author:u", "desc", "c1")
-	if err != nil || r.Total != 150 || r.HasNext || len(r.Items) != 1 || r.Items[0].Repo != "x/y" {
-		t.Errorf("SearchNext() = %+v, %v", r, err)
+	r, err := gh.SearchMany([]searchReq{{Query: "a", N: 1}, {Query: "b", N: 2, Extra: extraAccepted}, {Query: "c", N: 2, Extra: extraState}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r[1].Items
+	if len(got) != 2 || got[0].State != "MERGED" || got[0].MergedBy != "m" || got[0].Approvals != 2 ||
+		got[1].State != "CLOSED" || got[1].MergedBy != "" {
+		t.Errorf("items = %+v", got)
+	}
+}
+
+func TestSearchManyLeavesOutUnusedExtras(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, _ map[string]any) string {
+		if strings.Contains(query, "fragment state") || strings.Contains(query, "fragment accepted") {
+			t.Errorf("unused detail fragment would be rejected:\n%s", query)
+		}
+		return `{"data":{"s0":{"issueCount":0,"nodes":[]}}}`
+	}).client(t)
+	if _, err := gh.SearchMany([]searchReq{{Query: "a", N: 1}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviewedPRsFetchesCommitsOnlyForLongReviews(t *testing.T) {
+	calls := 0
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		calls++
+		if calls == 1 {
+			if vars["q"] != "repo:o/r is:pr author:u is:merged sort:updated-desc" || vars["n"] != float64(heavyCandidates) {
+				t.Errorf("vars = %v", vars)
+			}
+			return `{"data":{"search":{"nodes":[{"number":1,"reviewThreads":{"totalCount":3}},
+				{"number":2,"reviewThreads":{"totalCount":25}},{"number":3,"reviewThreads":{"totalCount":20}},{}]}}}`
+		}
+		if strings.Contains(query, "number: 1)") || !strings.Contains(query, "pr0: pullRequest(number: 2)") ||
+			!strings.Contains(query, "pr1: pullRequest(number: 3)") {
+			t.Errorf("commits query should cover 2 then 3, most threads first:\n%s", query)
+		}
+		return `{"data":{"repository":{"pr0":{"number":2,"commits":{"totalCount":0,"nodes":[]}},
+			"pr1":{"number":3,"commits":{"totalCount":0,"nodes":[]}}}}}`
+	}).client(t)
+	prs, err := gh.ReviewedPRs("o/r", "repo:o/r is:pr author:u is:merged", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(prs) != 2 || prs[0].ReviewThreads != 25 || prs[1].ReviewThreads != 20 {
+		t.Errorf("calls %d, prs %+v", calls, prs)
+	}
+}
+
+func TestReviewedPRsNoneLong(t *testing.T) {
+	calls := 0
+	gh := graphQLFunc(func(t *testing.T, _ string, _ map[string]any) string {
+		calls++
+		return `{"data":{"search":{"nodes":[{"number":1,"reviewThreads":{"totalCount":19}}]}}}`
+	}).client(t)
+	prs, err := gh.ReviewedPRs("o/r", "q", 20)
+	if err != nil || len(prs) != 0 || calls != 1 {
+		t.Errorf("prs %+v, err %v, calls %d", prs, err, calls)
 	}
 }
 

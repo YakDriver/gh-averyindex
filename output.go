@@ -124,12 +124,30 @@ func renderGlobal(w io.Writer, g Global) {
 		{"PRs opened", fmt.Sprintf("%s · %s merged · %s open · %s closed unmerged",
 			thousands(g.PRsOpened), thousands(g.PRsMerged), thousands(g.PRsOpen), thousands(g.ClosedUnmerged()))},
 		{"Merge rate", rate},
+		{"Accepted", accepted(g)},
 		{"Own projects", projects(g)},
 		{fmt.Sprintf("Last %d days", recentDays), recent},
+		{fmt.Sprintf("Days %d to %d", recentDays+1, sprayDays), spray(g)},
 	} {
 		fmt.Fprintf(tw, "  %s\t%s\n", row[0], row[1])
 	}
 	tw.Flush()
+}
+
+func accepted(g Global) string {
+	if g.AcceptedSampled == 0 {
+		return "no merged PRs to check"
+	}
+	return fmt.Sprintf("%s of the newest %s merged or approved by someone else",
+		thousands(g.AcceptedElsewhere), plural(g.AcceptedSampled, "merged PR"))
+}
+
+func spray(g Global) string {
+	if g.SpraySampled == 0 {
+		return "no PRs"
+	}
+	return fmt.Sprintf("closed unmerged in %s with nothing merged (newest %s)",
+		plural(g.SprayRepos, "repo"), plural(g.SpraySampled, "PR"))
 }
 
 func projects(g Global) string {
@@ -178,6 +196,10 @@ func renderPRs(w io.Writer, m Metrics) error {
 			pr.Number, date(pr.MergedAt), thousands(pr.Additions), thousands(pr.Deletions),
 			pr.Rework*100, pr.Credit, note)
 	}
+	for _, pr := range m.HeavyPRs {
+		fmt.Fprintf(tw, "  #%d\theavy\t%s\t%s by others\tcredit 0\n",
+			pr.Number, plural(pr.ReviewThreads, "review thread"), plural(pr.MaintainerCommits, "commit"))
+	}
 	for _, pr := range m.OpenPRs {
 		fmt.Fprintf(tw, "  #%d\topen since %s\n", pr.Number, date(pr.CreatedAt))
 	}
@@ -189,6 +211,9 @@ func renderPRs(w io.Writer, m Metrics) error {
 	}
 	if m.PRsMerged > len(m.RecentMerged) && len(m.RecentMerged) > 0 {
 		fmt.Fprintf(w, "  Rework checked on the %d most recent merged PRs.\n", len(m.RecentMerged))
+	}
+	if m.PRsMerged > heavyCandidates {
+		fmt.Fprintf(w, "  Heavy review checked on the %d most recently updated merged PRs.\n", heavyCandidates)
 	}
 	return nil
 }

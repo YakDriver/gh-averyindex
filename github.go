@@ -24,6 +24,11 @@ type searchItem struct {
 	Repo      string    `json:"repo,omitempty"` // owner/name
 	Author    string    `json:"author,omitempty"`
 	AuthorBot bool      `json:"author_bot,omitempty"`
+
+	// Set only for PRs, by searches that ask for them (searchReq.Extra).
+	State     string `json:"-"` // OPEN, CLOSED, or MERGED
+	MergedBy  string `json:"-"`
+	Approvals int    `json:"-"`
 }
 
 func (s searchItem) kind() string {
@@ -49,6 +54,7 @@ type rawPR struct {
 	Deletions        int
 	Commits          []rawCommit
 	CommitsTruncated bool
+	ReviewThreads    int
 }
 
 // source is the subset of GitHub data that collect needs. It exists so
@@ -57,12 +63,13 @@ type source interface {
 	// SearchMany runs several issue/PR searches together and returns a
 	// result for each request, in order.
 	SearchMany(reqs []searchReq) ([]searchResult, error)
-	// SearchNext returns the page of up to 100 results after cursor, as
-	// returned in a previous result's EndCursor.
-	SearchNext(query, order, cursor string) (searchResult, error)
 	// MergedPRs returns the total count of merged PRs matching query and the
 	// n most recently merged of them in repo, with commits.
 	MergedPRs(repo, query string, n int) (total int, prs []rawPR, err error)
+	// ReviewedPRs checks the heavyCandidates most recently updated PRs
+	// matching query and returns those with at least minThreads review
+	// threads, with commits.
+	ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error)
 	// OwnedRepoStars returns the star counts of the user's public, non-fork
 	// repositories, at most the 100 most starred.
 	OwnedRepoStars(login string) ([]int, error)
@@ -75,19 +82,44 @@ type source interface {
 
 // searchReq is one issue/PR search. Order is "asc" or "desc" by creation
 // time, or "" for best match. N is how many items to return; 0 returns only
-// the count.
+// the count. Extra asks for more about each PR. It costs more, so only the
+// searches that need it ask.
 type searchReq struct {
 	Query string
 	Order string
 	N     int
+	Extra extra
+}
+
+// extra is what a search returns about each PR beyond the basics.
+type extra int
+
+const (
+	extraNone extra = iota
+	// extraState adds the PR's state: OPEN, CLOSED, or MERGED.
+	extraState
+	// extraAccepted adds who merged the PR and how many approvals it had.
+	extraAccepted
+)
+
+// fragment is the name and definition of the GraphQL fragment for e. Each
+// builds on the item fragment.
+func (e extra) fragment() (name, def string) {
+	switch e {
+	case extraState:
+		return "state", `fragment state on SearchResultItem { ...item ... on PullRequest { state } }`
+	case extraAccepted:
+		return "accepted", `fragment accepted on SearchResultItem {
+  ...item
+  ... on PullRequest { mergedBy { login } reviews(states: APPROVED) { totalCount } }
+}`
+	}
+	return "item", itemFragments
 }
 
 type searchResult struct {
 	Total int
 	Items []searchItem
-	// EndCursor continues an item search with SearchNext when HasNext.
-	EndCursor string
-	HasNext   bool
 }
 
 type gitHub struct {
@@ -185,15 +217,22 @@ func (g *gitHub) SearchMany(reqs []searchReq) ([]searchResult, error) {
 		vars[fmt.Sprintf("q%d", i)] = r.Query + graphQLSort(r.Order)
 		fmt.Fprintf(&q, "  s%d: search(query: $q%d, type: ISSUE, first: %d) { issueCount", i, i, min(r.N, searchPageSize))
 		if r.N > 0 {
-			q.WriteString(" pageInfo { hasNextPage endCursor } nodes { __typename ...item }")
+			name, _ := r.Extra.fragment()
+			fmt.Fprintf(&q, " nodes { __typename ...%s }", name)
 		}
 		q.WriteString(" }\n")
 	}
 	q.WriteString("}\n")
-	// GraphQL rejects a fragment that isn't used, so a batch of counts only
-	// leaves it out.
+	// GraphQL rejects a fragment that isn't used, so each is included only
+	// when a search needs it. Every extra builds on the item fragment.
 	if slices.ContainsFunc(reqs, func(r searchReq) bool { return r.N > 0 }) {
 		q.WriteString(itemFragments)
+	}
+	for _, e := range []extra{extraState, extraAccepted} {
+		if slices.ContainsFunc(reqs, func(r searchReq) bool { return r.N > 0 && r.Extra == e }) {
+			_, def := e.fragment()
+			q.WriteString("\n" + def)
+		}
 	}
 
 	var resp map[string]searchNode
@@ -209,42 +248,17 @@ func (g *gitHub) SearchMany(reqs []searchReq) ([]searchResult, error) {
 
 type searchNode struct {
 	IssueCount int
-	PageInfo   struct {
-		HasNextPage bool
-		EndCursor   string
-	}
-	Nodes []itemNode
+	Nodes      []itemNode
 }
 
 func (n searchNode) result() searchResult {
-	r := searchResult{Total: n.IssueCount, HasNext: n.PageInfo.HasNextPage, EndCursor: n.PageInfo.EndCursor}
+	r := searchResult{Total: n.IssueCount}
 	for _, it := range n.Nodes {
 		if it.Typename == "Issue" || it.Typename == "PullRequest" {
 			r.Items = append(r.Items, it.item())
 		}
 	}
 	return r
-}
-
-const searchNextQuery = `
-query($q: String!, $cursor: String!) {
-  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
-    issueCount
-    pageInfo { hasNextPage endCursor }
-    nodes { __typename ...item }
-  }
-}
-` + itemFragments
-
-// SearchNext continues a search in GraphQL, so paging doesn't use the REST
-// search limit either.
-func (g *gitHub) SearchNext(query, order, cursor string) (searchResult, error) {
-	var resp struct{ Search searchNode }
-	vars := map[string]any{"q": query + graphQLSort(order), "cursor": cursor}
-	if err := g.gqlDo(searchNextQuery, vars, &resp); err != nil {
-		return searchResult{}, fmt.Errorf("search %q: %w", query, err)
-	}
-	return resp.Search.result(), nil
 }
 
 // graphQLSort turns an order into a search qualifier. GraphQL search has no
@@ -273,6 +287,9 @@ type itemNode struct {
 		Login    string
 		Typename string `json:"__typename"`
 	}
+	State    string
+	MergedBy *struct{ Login string }
+	Reviews  *struct{ TotalCount int }
 }
 
 func (n itemNode) item() searchItem {
@@ -281,6 +298,13 @@ func (n itemNode) item() searchItem {
 		CreatedAt: n.CreatedAt,
 		IsPR:      n.Typename == "PullRequest",
 		Repo:      n.Repository.NameWithOwner,
+		State:     n.State,
+	}
+	if n.MergedBy != nil {
+		it.MergedBy = n.MergedBy.Login
+	}
+	if n.Reviews != nil {
+		it.Approvals = n.Reviews.TotalCount
 	}
 	if n.Author != nil {
 		it.Author = n.Author.Login
@@ -514,10 +538,15 @@ func (g *gitHub) MergedPRs(repo, query string, n int) (int, []rawPR, error) {
 		candidates = append(candidates, rawPR{Number: c.Number, MergedAt: c.MergedAt})
 	}
 	numbers := mostRecentlyMerged(candidates, n)
-	if len(numbers) == 0 {
-		return cand.Search.IssueCount, nil, nil
-	}
+	prs, err := g.prsWithCommits(repo, numbers)
+	return cand.Search.IssueCount, prs, err
+}
 
+// prsWithCommits fetches PRs by number in one request, with their commits.
+func (g *gitHub) prsWithCommits(repo string, numbers []int) ([]rawPR, error) {
+	if len(numbers) == 0 {
+		return nil, nil
+	}
 	owner, name, _ := strings.Cut(repo, "/")
 	var q strings.Builder
 	q.WriteString("query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n")
@@ -530,7 +559,7 @@ func (g *gitHub) MergedPRs(repo, query string, n int) (int, []rawPR, error) {
 		Repository map[string]*prNode
 	}
 	if err := g.gqlDo(q.String(), map[string]any{"owner": owner, "name": name}, &resp); err != nil {
-		return 0, nil, fmt.Errorf("commits for merged PRs in %s: %w", repo, err)
+		return nil, fmt.Errorf("commits for merged PRs in %s: %w", repo, err)
 	}
 	prs := make([]rawPR, 0, len(numbers))
 	for i := range numbers {
@@ -538,7 +567,54 @@ func (g *gitHub) MergedPRs(repo, query string, n int) (int, []rawPR, error) {
 			prs = append(prs, node.raw())
 		}
 	}
-	return cand.Search.IssueCount, prs, nil
+	return prs, nil
+}
+
+const (
+	// heavyCandidates is how many merged PRs are checked for heavy review.
+	// One search returns at most 100.
+	heavyCandidates = 100
+	// maxHeavyChecked is how many of those get their commits fetched.
+	maxHeavyChecked = 10
+)
+
+const reviewThreadsQuery = `
+query($q: String!, $n: Int!) {
+  search(query: $q, type: ISSUE, first: $n) {
+    nodes { ... on PullRequest { number reviewThreads { totalCount } } }
+  }
+}`
+
+func (g *gitHub) ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error) {
+	var resp struct {
+		Search struct {
+			Nodes []struct {
+				Number        int
+				ReviewThreads struct{ TotalCount int }
+			}
+		}
+	}
+	vars := map[string]any{"q": query + " sort:updated-desc", "n": heavyCandidates}
+	if err := g.gqlDo(reviewThreadsQuery, vars, &resp); err != nil {
+		return nil, fmt.Errorf("review threads for %q: %w", query, err)
+	}
+	threads := map[int]int{}
+	var numbers []int
+	for _, n := range resp.Search.Nodes {
+		if n.Number > 0 && n.ReviewThreads.TotalCount >= minThreads {
+			numbers = append(numbers, n.Number)
+			threads[n.Number] = n.ReviewThreads.TotalCount
+		}
+	}
+	// Commits are fetched for the most-discussed few, which keeps the
+	// request small for someone with many long reviews.
+	slices.SortStableFunc(numbers, func(a, b int) int { return threads[b] - threads[a] })
+	numbers = numbers[:min(len(numbers), maxHeavyChecked)]
+	prs, err := g.prsWithCommits(repo, numbers)
+	for i := range prs {
+		prs[i].ReviewThreads = threads[prs[i].Number]
+	}
+	return prs, err
 }
 
 const ownedReposQuery = `

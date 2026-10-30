@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -23,10 +24,10 @@ import (
 type fakeSearch struct {
 	total int
 	items []searchItem
-	next  string // cursor for SearchNext, if there's another page
 }
 
 type fakeSource struct {
+	mu          sync.Mutex            // collect sends two batches at once
 	search      map[string]fakeSearch // keyed by order + "|" + query
 	queries     []string
 	merged      int
@@ -39,9 +40,14 @@ type fakeSource struct {
 
 	thumbsQuery, thumbsAuthor string
 	batches                   int
+	reviewed                  []rawPR
+	reviewedQuery             string
+	details                   []string // queries of searches with extras
 }
 
 func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.batches++
 	var results []searchResult
 	for _, r := range reqs {
@@ -49,21 +55,12 @@ func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		res := searchResult{Total: total, Items: items}
-		// Like GraphQL, an item search with more results has a cursor.
-		if r.N > 0 && total > len(items) {
-			res.HasNext, res.EndCursor = true, "page2"
+		if r.Extra != extraNone {
+			f.details = append(f.details, r.Query)
 		}
-		results = append(results, res)
+		results = append(results, searchResult{Total: total, Items: items})
 	}
 	return results, nil
-}
-
-func (f *fakeSource) SearchNext(q, order, cursor string) (searchResult, error) {
-	key := order + "|" + q + "|" + cursor
-	f.queries = append(f.queries, key)
-	r := f.search[key]
-	return searchResult{Total: r.total, Items: r.items, HasNext: r.next != "", EndCursor: r.next}, f.err
 }
 
 func (f *fakeSource) OwnedRepoStars(string) ([]int, error) {
@@ -83,6 +80,11 @@ func (f *fakeSource) Search(q, order string, n int) (int, []searchItem, error) {
 func (f *fakeSource) MergedPRs(repo, q string, n int) (int, []rawPR, error) {
 	f.mergedQuery = repo + " " + q
 	return f.merged, f.prs[:min(n, len(f.prs))], nil
+}
+
+func (f *fakeSource) ReviewedPRs(repo, q string, minThreads int) ([]rawPR, error) {
+	f.reviewedQuery = fmt.Sprintf("%s %s >=%d", repo, q, minThreads)
+	return f.reviewed, f.err
 }
 
 func (f *fakeSource) ThumbsUp(q, author string) (int, bool, error) {
@@ -190,8 +192,8 @@ func TestCollectGlobalScope(t *testing.T) {
 			global = append(global, q)
 		}
 	}
-	if len(global) != 7 {
-		t.Fatalf("got %d global queries, want 7: %q", len(global), global)
+	if len(global) != 9 {
+		t.Fatalf("got %d global queries, want 9: %q", len(global), global)
 	}
 	for _, q := range global {
 		// Own repos are excluded because anyone can merge their own PRs (#1).
@@ -371,8 +373,10 @@ func TestCollectSendsSearchesInOneBatch(t *testing.T) {
 	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
 		t.Fatal(err)
 	}
-	if src.batches != 1 {
-		t.Errorf("%d search batches, want 1 (#26)", src.batches)
+	// One batch for the plain searches (#26), plus one for each search with
+	// extras, all sent at once. Together they can exceed GitHub's limits.
+	if src.batches != 3 {
+		t.Errorf("%d search batches, want 3", src.batches)
 	}
 	if slices.ContainsFunc(src.queries, func(q string) bool { return strings.Contains(q, "|page") }) {
 		t.Errorf("paged with nothing to page: %q", src.queries)
@@ -641,11 +645,10 @@ func TestFlags(t *testing.T) {
 		{"spray, mostly closed", Metrics{PRsOpened: 2, Global: Global{AccountCreated: testNow, AccountAgeDays: 17,
 			PRsOpened: 108, PRsMerged: 3, PRsOpen: 82, MergedElsewhere: 3,
 			RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23, RecentRepos: 22}},
-			[]string{flagNotLanding, flagNewBurst, flagDriveBy}},
+			[]string{flagNotLanding, flagDriveBy}},
 		// The gap left by #2: nothing closed yet, so no penalty to speak of.
 		{"spray, all still open", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
-			PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}},
-			[]string{flagNewBurst}},
+			PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}, nil},
 		{"new account, few repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 30,
 			PRsOpened: 30, PRsOpen: 30, RecentPRs: 30, RecentRepos: 3}}, nil},
 		{"old account, many repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 2000,
@@ -654,10 +657,12 @@ func TestFlags(t *testing.T) {
 			Global: Global{AccountCreated: testNow, AccountAgeDays: 1487, PRsOpened: 116, PRsMerged: 38, PRsOpen: 72,
 				MergedElsewhere: 35, RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6, RecentRepos: 8}}, nil},
 		// Copilot on #18: a big penalty with nothing resolved can't claim
-		// recent PRs "mostly didn't land." The new-account flag covers it.
+		// recent PRs "mostly didn't land."
 		{"200 open, nothing resolved", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
-			PRsOpened: 200, PRsOpen: 200, RecentPRs: 200, RecentRepos: 40}},
-			[]string{flagNewBurst}},
+			PRsOpened: 200, PRsOpen: 200, RecentPRs: 200, RecentRepos: 40}}, nil},
+		{"heavy PR", Metrics{PRsOpened: 3, PRsMerged: 3, HeavyPRs: []HeavyPR{{1, 28, 57}}}, []string{flagHeavy}},
+		// Wide spray is a graded line, not a flag (tuning.md, H2f).
+		{"wide spray", Metrics{Threads: 1, Global: Global{AccountAgeDays: 2000, SprayRepos: 60, SpraySampled: 100}}, nil},
 		{"half of recent resolved merged", Metrics{Global: Global{AccountAgeDays: 3000,
 			PRsOpened: 400, PRsMerged: 20, PRsOpen: 0, RecentPRs: 300, RecentMerged: 10, RecentClosedUnmerged: 10}}, nil},
 		{"drive-by only", Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 400}}, []string{flagDriveBy}},
@@ -680,48 +685,8 @@ func repoItems(n int, repo func(i int) string) []searchItem {
 	return items
 }
 
-func TestCollectReadsMorePagesToCountRepos(t *testing.T) {
-	// Copilot on #18: the newest 100 PRs all went to one repo and the older 9
-	// to nine others. The first page alone would show 1 repo.
-	const q = "is:pr author:u is:public -user:u created:>=2026-09-29"
-	src := &fakeSource{search: map[string]fakeSearch{
-		"desc|" + q:            {total: 109, items: repoItems(100, func(int) string { return "a/a" })},
-		"desc|" + q + "|page2": {total: 109, items: repoItems(9, func(i int) string { return fmt.Sprintf("r/%d", i) })},
-	}}
-	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: testNow.AddDate(0, 0, -5)}, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Global.RecentRepos != 10 || m.Global.RecentSampled != 109 {
-		t.Errorf("repos = %d from %d PRs, want 10 from 109", m.Global.RecentRepos, m.Global.RecentSampled)
-	}
-	if !slices.Contains(flagCodes(m), flagNewBurst) {
-		t.Errorf("new-account flag missing: %v", flagCodes(m))
-	}
-}
-
-func TestCollectStopsPagingOnceReposAreKnown(t *testing.T) {
-	const q = "is:pr author:u is:public -user:u created:>=2026-09-29"
-	src := &fakeSource{search: map[string]fakeSearch{
-		"desc|" + q: {total: 150, items: repoItems(100, func(i int) string { return fmt.Sprintf("r/%d", i%12) })},
-	}}
-	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: testNow.AddDate(0, 0, -5)}, testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if slices.ContainsFunc(src.queries, func(q string) bool { return strings.Contains(q, "|page") }) {
-		t.Errorf("read more pages after finding 12 repos: %q", src.queries)
-	}
-	// Counted from 100 of 150 PRs, so the message says it's a lower bound.
-	r := score(m, defaultWeights)
-	i := slices.IndexFunc(r.Flags, func(f Flag) bool { return f.Code == flagNewBurst })
-	if i < 0 || !strings.Contains(r.Flags[i].Message, "150 PRs across at least 12 repos") {
-		t.Errorf("flags = %+v", r.Flags)
-	}
-}
-
 func TestFlagsDontChangeScore(t *testing.T) {
-	m := Metrics{Global: Global{AccountCreated: testNow, AccountAgeDays: 3, PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}
+	m := Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 3, PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}
 	r := score(m, defaultWeights)
 	var sum float64
 	for _, c := range r.Components {
@@ -733,14 +698,14 @@ func TestFlagsDontChangeScore(t *testing.T) {
 }
 
 func TestRenderFlagsInHeader(t *testing.T) {
-	m := Metrics{User: "u", Repo: "o/r", Global: Global{AccountCreated: testNow, AccountAgeDays: 6,
-		PRsOpened: 50, PRsMerged: 26, RecentPRs: 50, RecentMerged: 26, RecentRepos: 35, RecentSampled: 50}, Threads: 1}
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 14, PRsMerged: 14, Threads: 1,
+		HeavyPRs: []HeavyPR{{Number: 7, ReviewThreads: 21, MaintainerCommits: 12}, {Number: 9, ReviewThreads: 28, MaintainerCommits: 57}}}
 	var buf bytes.Buffer
 	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(buf.String(), "\n")
-	want := "  ⚠ New account: 6 days old, 50 PRs across 35 repos in 30 days, 26 merged so far"
+	want := "  ⚠ Heavy maintainer involvement on 2 merged PRs (#9: 28 review threads, 57 commits by others)"
 	if len(lines) < 2 || lines[1] != want {
 		t.Errorf("line 2 = %q, want %q", lines[1], want)
 	}
@@ -1343,5 +1308,136 @@ func TestThousands(t *testing.T) {
 		if got := thousands(n); got != want {
 			t.Errorf("thousands(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestSprayPoints(t *testing.T) {
+	for _, tt := range []struct {
+		repos  int
+		lo, hi float64
+	}{
+		{0, 0, 0}, {1, -0.1, 0}, {5, -0.4, -0.1}, {11, -1.5, -1.1}, {15, -3.5, -3.0},
+		{20, -7.6, -7.3}, {30, -14, -13.6}, {50, -14.9, -14.8}, {500, -14.95, -14.85},
+	} {
+		if got := sprayPoints(tt.repos, defaultWeights); got < tt.lo || got > tt.hi {
+			t.Errorf("sprayPoints(%d) = %.2f, want %.1f to %.1f", tt.repos, got, tt.lo, tt.hi)
+		}
+	}
+}
+
+func TestSprayRepos(t *testing.T) {
+	items := []searchItem{
+		{Repo: "a/a", State: "CLOSED"}, {Repo: "a/a", State: "CLOSED"}, // counts once
+		{Repo: "b/b", State: "CLOSED"}, {Repo: "b/b", State: "MERGED"}, // something landed
+		{Repo: "c/c", State: "OPEN"}, // waiting for review doesn't count
+		{Repo: "d/d", State: "OPEN"}, {Repo: "d/d", State: "CLOSED"},
+	}
+	if got := sprayRepos(items); got != 2 {
+		t.Errorf("sprayRepos() = %d, want 2 (a/a and d/d)", got)
+	}
+}
+
+func TestCollectSprayWindowSkipsRecent(t *testing.T) {
+	// Spray starts the day before the 30-day window, so not-landing and
+	// spray never count the same PR (tuning.md, H2e).
+	const q = "is:pr author:u is:public -user:u created:2026-05-02..2026-09-28"
+	src := &fakeSource{search: map[string]fakeSearch{"desc|" + q: {total: 3, items: []searchItem{
+		{Repo: "a/a", State: "CLOSED"}, {Repo: "b/b", State: "CLOSED"}, {Repo: "c/c", State: "MERGED"},
+	}}}}
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Global.SprayRepos != 2 || m.Global.SpraySampled != 3 {
+		t.Errorf("spray = %d repos from %d PRs, want 2 from 3", m.Global.SprayRepos, m.Global.SpraySampled)
+	}
+	if !slices.Contains(src.details, q) {
+		t.Errorf("spray search isn't detailed: %q", src.details)
+	}
+}
+
+func TestAcceptedByOthers(t *testing.T) {
+	items := []searchItem{
+		{MergedBy: "U"},               // self-merged, no approval
+		{MergedBy: "u", Approvals: 1}, // self-merged after approval
+		{MergedBy: "maintainer"},      // merged by someone else
+		{MergedBy: ""},                // merger's account deleted
+	}
+	if got := acceptedByOthers("u", items); got != 3 {
+		t.Errorf("acceptedByOthers() = %d, want 3", got)
+	}
+}
+
+func TestScoreElsewhereWeightedByAcceptance(t *testing.T) {
+	base := Global{AccountAgeDays: 30, MergedElsewhere: 100}
+	merged := func(g Global) Component {
+		r := score(Metrics{Global: g}, defaultWeights)
+		return r.Components[slices.IndexFunc(r.Components, func(c Component) bool { return c.Label == "PRs merged elsewhere" })]
+	}
+	full := merged(base)
+	if full.Count != 100 || full.Detail != "" {
+		t.Errorf("no sample: %+v", full)
+	}
+	base.AcceptedElsewhere, base.AcceptedSampled = 25, 100
+	quarter := merged(base)
+	if quarter.Count != 25 || quarter.Points >= full.Points ||
+		quarter.Detail != "100 merged · 25% accepted by others" {
+		t.Errorf("quarter accepted: %+v (full %+v)", quarter, full)
+	}
+}
+
+func TestMaintainerCommits(t *testing.T) {
+	c := func(logins ...string) rawCommit { return rawCommit{Logins: logins, Additions: 1} }
+	pr := rawPR{Commits: []rawCommit{
+		c("u"), c(), // own, and unlinked counts as own
+		c("m1"), c("m2"), c("m1", "u"), // co-authored with u counts as own
+		c("github-actions[bot]"),
+		{Logins: []string{"m1"}, Merge: true},
+	}}
+	if got := maintainerCommits("u", pr); got != 2 {
+		t.Errorf("maintainerCommits() = %d, want 2", got)
+	}
+	// G1's case: a long review, but the author made every commit.
+	own := rawPR{Commits: slices.Repeat([]rawCommit{c("u")}, 63)}
+	if got := maintainerCommits("u", own); got != 0 {
+		t.Errorf("own commits = %d, want 0", got)
+	}
+}
+
+func TestCollectHeavyPRs(t *testing.T) {
+	c := func(login string, n int) []rawCommit {
+		return slices.Repeat([]rawCommit{{Logins: []string{login}, Additions: 1}}, n)
+	}
+	src := &fakeSource{merged: 14, prs: []rawPR{{Number: 5, Commits: c("u", 1)}}, reviewed: []rawPR{
+		{Number: 43, ReviewThreads: 28, Commits: append(c("u", 5), c("m", 10)...)}, // heavy
+		{Number: 44, ReviewThreads: 21, Commits: append(c("u", 60), c("m", 9)...)}, // one short
+	}}
+	src.search = map[string]fakeSearch{"|repo:o/r is:pr author:u": {total: 20}}
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []HeavyPR{{43, 28, 10}}; !slices.Equal(m.HeavyPRs, want) {
+		t.Errorf("heavy = %+v, want %+v", m.HeavyPRs, want)
+	}
+	if src.reviewedQuery != "o/r repo:o/r is:pr author:u is:merged >=20" {
+		t.Errorf("reviewed query = %q", src.reviewedQuery)
+	}
+	if got := m.CodeCredit(); got != 13 {
+		t.Errorf("code credit = %v, want 13 (14 merged, 1 heavy)", got)
+	}
+}
+
+func TestAvgCreditSkipsHeavy(t *testing.T) {
+	m := Metrics{PRsMerged: 10, RecentMerged: []MergedPR{{Number: 1, Credit: 0}, {Number: 2, Credit: 0.5}},
+		HeavyPRs: []HeavyPR{{Number: 1}}}
+	// PR 1 already earns nothing as a heavy PR, so its rework isn't counted
+	// again in the average.
+	if got := m.AvgCredit(); got != 0.5 {
+		t.Errorf("AvgCredit() = %v, want 0.5", got)
+	}
+	m.HeavyPRs = []HeavyPR{{Number: 1}, {Number: 2}}
+	if got := m.AvgCredit(); got != 1 {
+		t.Errorf("all sampled PRs heavy: AvgCredit() = %v, want 1", got)
 	}
 }
