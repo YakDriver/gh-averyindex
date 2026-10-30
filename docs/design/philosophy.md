@@ -14,7 +14,7 @@ averyindex feeds a vouch system, and the vouch system is the gate. The tool supp
 | What it relies on | Positive signals that other people control | The whole breakdown and its flags |
 | Priority | Hard to inflate | Fast, honest, and slow to condemn |
 
-Penalties barely matter for auto-vouch, because a sprayer never gets near the bar. Flags matter most on request, because a person reads them.
+Penalties barely matter for auto-vouch; a sprayer never gets near the bar. On request, the breakdown and flags do more of the work, because a maintainer is reading them.
 
 ## Two kinds of spray
 
@@ -32,8 +32,8 @@ Both cost review time, but schemes are much worse. averyindex reports the same f
 1. **Design for the threat we have.** Today's PR spraying is cheap and indiscriminate. Write down elaborate gaming, such as sock puppets, staged adoption, or padded reviews, and limit the damage it can do. Don't design around it until the data shows someone doing it.
 2. **Credit what others validated.** Merges, approvals, and replies from other people count. Activity someone can produce alone counts for little or nothing.
 3. **Judge the contribution, not the person.** The question is whether someone's history suggests they help more than they cost maintainers. Whether they're human or use AI is beside the point. A slop label belongs to a PR, not to a person.
-4. **Make costly patterns visible.** Rework and spraying are what cost maintainers, so the report should show them plainly. Visible means a flag with facts. It doesn't have to mean a big cut to the score.
-5. **Evidence, not verdicts.** The score summarizes, flags invite a closer look, and maintainers decide. A low score can just mean little visible history.
+4. **Make costly patterns visible.** Rework and spraying are what cost maintainers, so the report should show them plainly. Visible means a breakdown line or flag that states the facts. Flags are for yes-or-no patterns, and matters of degree get a graded line. Neither has to mean a big cut to the score.
+5. **Evidence, not verdicts.** The score is a summary, and the flags point to what's worth a closer look. The maintainer decides. A low score can just mean little visible history.
 6. **Cheap and bounded.** Use signals GitHub already exposes. Respect rate limits, keep runs fast, and say when data is incomplete.
 7. **Layered defenses.** Vouching controls who can open PRs, and denouncing stops repeat offenders. averyindex only has to describe a first encounter well. Malicious PRs that attack CI are a security problem for other tools.
 8. **Change with evidence.** Add defenses when observed patterns justify their cost. State the sample size behind every threshold.
