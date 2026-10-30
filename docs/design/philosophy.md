@@ -16,6 +16,17 @@ averyindex feeds a vouch system, and the vouch system is the gate. The tool supp
 
 Penalties barely matter for auto-vouch, because a sprayer never gets near the bar. Flags matter most on request, because a person reads them.
 
+## Two kinds of spray
+
+| | Schemes | Reputation seekers |
+|---|---|---|
+| Who | Farms promoting a product, a WhatsApp scam, or another scheme | A person padding a résumé or profile with AI at hand |
+| How | Automated PRs, often from many accounts, with links or payloads | Many plausible-looking PRs, some of which land |
+| Intent | Use the repo | Get credit from the repo |
+| Response | Denounce. No conversation. | Decline the vouch, say why, and leave the door open |
+
+Both cost review time, but schemes are much worse. averyindex reports the same facts for both (principle 3), and a maintainer chooses the response. Reputation seekers can earn trust later with work that lands. Schemes don't get that path. Telling the two apart is a maintainer's call, not a score.
+
 ## Principles
 
 1. **Design for the threat we have.** Today's PR spraying is cheap and indiscriminate. Write down elaborate gaming, such as sock puppets, staged adoption, or padded reviews, and limit the damage it can do. Don't design around it until the data shows someone doing it.
@@ -32,6 +43,6 @@ Penalties barely matter for auto-vouch, because a sprayer never gets near the ba
 - The problem is measurable. A study of 294 repositories and over 2 million PRs and issues found PR volume rose in 2025 while merge rates fell. One-time contributors' merge rates dropped 18% ([arXiv 2607.04003](https://arxiv.org/abs/2607.04003)).
 - It's widespread. In a Linux Foundation survey, maintainers estimated that 25% of incoming PRs are AI slop, and 31% in large projects. These are estimates, not measurements ([LF, 2026-10-20](https://www.linuxfoundation.org/press/new-lf-research-survey-shows-generative-ai-cuts-open-source-coding-time-in-half-but-25-of-incoming-pull-requests-are-considered-ai-slop)).
 - Platforms are responding. GitHub described the problem in February 2026 ([blog](https://github.blog/open-source/maintainers/welcome-to-the-eternal-september-of-open-source-heres-what-we-plan-to-do-for-maintainers/)), then added settings to restrict PRs and limit how many outside PRs can be open at once ([PR limits](https://github.blog/open-source/maintainers/how-pull-request-limits-are-cutting-down-the-noise/)).
-- Some spraying is an attack. The prt-scan campaign used six accounts to open over 500 malicious PRs against `pull_request_target` workflows ([Wiz](https://wiz.io/blog/six-accounts-one-actor-inside-the-prt-scan-supply-chain-campaign)). That's out of scope here (principle 7).
+- Some spraying is an attack. The prt-scan campaign used six accounts to open over 500 malicious PRs against `pull_request_target` workflows ([Wiz](https://wiz.io/blog/six-accounts-one-actor-inside-the-prt-scan-supply-chain-campaign)). That's the far end of schemes, and it's out of scope here (principle 7).
 
 Expect sprayers to avoid gated repos before they try to fool a scorer. If vouching becomes common, reputation farming becomes worth their effort. Then revisit principle 1.
