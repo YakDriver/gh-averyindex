@@ -19,8 +19,9 @@ var version = ""
 //	3: the new-account-burst flag is gone, and heavy-maintainer-involvement
 //	   is new. Code credit leaves out heavy_prs. The "PRs merged elsewhere"
 //	   component is weighted by the share accepted by others. New fields:
-//	   heavy_prs, and spray_repos, spray_sampled, accepted_elsewhere, and
-//	   accepted_sampled in global.
+//	   heavy_prs, heavy_unchecked, and spray_repos, spray_sampled,
+//	   accepted_elsewhere, and accepted_sampled in global. recent_repos now
+//	   comes from the newest 100 recent PRs, without paging for more.
 const schemaVersion = 3
 
 // buildInfo is the version and, when known, the commit and its date.

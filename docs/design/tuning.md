@@ -29,6 +29,7 @@ People are referred to by label. The raw data and the label key stay outside thi
 | H6 | Clean-looking slop is catchable. | T5 had 0 threads and 1 maintainer fix commit. | Accept the miss. |
 | H7 | Who merged a PR shows whether others accepted it. | No. Maintainers self-merge 94 to 100% of their PRs, but 98 to 100% were approved by someone else. S3 self-merged 69% and had 4% approved. | **Reject.** |
 | H7b | A merged PR shows acceptance when someone else merged it or approved it. | Maintainers and YakDriver at 98 to 100%. S3 at 33%: 31 merged by others, plus 2 self-merges that were approved. | **Adopt.** |
+| H7c | A bot merge without approval isn't review. | Prow, bors, and merge queues merge after people review, often by label. One comparison author's Kubernetes PRs went from 4 of 5 accepted to 1 of 5, dropping a tier. | **Reject.** |
 | H8 | Adoption shows trust for library authors that stars miss. | YakDriver's Go modules are imported by 25 owners, including pulumi, crossplane-contrib, and upbound. S1 and S2 have 0. But it's Go-only, misses org-hosted modules, and needs REST code search. | **Defer.** H7b keeps YakDriver's "Elsewhere," so nothing is lost meanwhile. |
 
 17 of the 18 tracked authors have 0 or 1 merged PRs here. The gate stops them, and no score separates them from a good newcomer. The costly cases were the 5 merged PRs. One slop PR is a fact about that PR. For T1 it's 1 of 14 merged.
@@ -36,7 +37,7 @@ People are referred to by label. The raw data and the label key stay outside thi
 ## Changes
 
 1. **Heavy maintainer involvement (H1b, H1c).** For up to 100 merged PRs here, fetch `reviewThreads.totalCount`. For PRs with 20+ threads, fetch commits. When maintainers made 10+ non-merge commits, that PR earns 0 credit through the existing credit path, with no separate penalty. Flag it: "Heavy maintainer involvement on N merged PRs (#X: 28 review threads, 57 maintainer commits)." Cost: 1 or 2 GraphQL requests.
-   - Accept if T1 to T4 are flagged, G1 and the comparison authors aren't, and T1 drops at most one tier.
+   - Accept if T1 to T4 are flagged; G1, the comparison authors, the maintainers, and YakDriver aren't; and T1 drops at most one tier.
 2. **Spray (H2e, H2f).** `U` counts repos in the user's newest 100 public PRs created 31 to 180 days ago, outside their own repos, that have a closed-unmerged PR and nothing merged. Open PRs don't count. The penalty is a logistic curve shifted so 0 repos scores 0: `-15/(1+e^(-(U-20)/4))`. That's -1 at 11, -3 at 15, -7 at 20, -14 at 30, and -15 at most. It's its own Pattern line, "PRs closed unmerged in N repos (31 to 180 days)," with no flag and no Pattern cap. `new-account-burst` goes away, and not-landing still covers the last 30 days.
    - Accept if S1 and S2 lose 13 or more, U1 and U2 lose 4 or fewer, no comparison author drops a tier, and the README's scheme example scores no higher than today.
 3. **Elsewhere counts what others accepted (H7b).** In a sample of merged PRs, fetch `mergedBy` and `reviews(states: APPROVED){totalCount}`. Scale merged-elsewhere by the share merged or approved by someone else, and show the share on the line. The score effect is small. Points are logarithmic, so cutting S3's 1,095 merges to a third removes about 6 points, and the 20-point Elsewhere cap absorbs that because age and stars already exceed it. The gain is that the report says what others accepted. Thin profiles built on self-merges lose the most, which is the intent.
@@ -45,38 +46,25 @@ People are referred to by label. The raw data and the label key stay outside thi
 5. **Line rework stays as is (H3).**
 6. **Bump `schema_version` to 3.** Flag codes change, and merged-elsewhere changes meaning.
 
-## Implementation
+## As built
 
-Implemented in one PR. The plan below is what was built, except for these differences:
+All in one PR (#28). Names in the code:
 
-- The searches with extras go out as separate requests, sent in parallel with the main batch. In one request, GitHub returned 502s for prolific users, then "Resource limits for this query exceeded."
-- Extras come in two kinds, `extraState` and `extraAccepted`, so each search only pays for the fields it uses.
-- `SearchNext` and its paging are gone.
+- **Spray:** `Global.SprayRepos` and `SpraySampled`, from a search with `extraState`, scored by `sprayPoints`.
+- **Acceptance:** `Global.AcceptedElsewhere` and `AcceptedSampled`, from a search with `extraAccepted`. A PR counts if someone approved it or anyone else merged it, including a bot. Review raised ignoring bot merges unless approved (H7c). That failed: Kubernetes merges through Prow after `/lgtm` and `/approve` labels, with no GitHub approval, and one comparison author dropped a tier.
+- **Heavy review:** `ReviewedPRs` reads review threads on the 100 most recently updated merged PRs, then the last 100 commits of the 10 most discussed. Maintainers' commits come after review, so a long PR is read from the end. `Metrics.HeavyPRs` holds the results. If the check fails, the report says so and the run continues (`heavy_unchecked`). It runs in parallel with the rework sample.
+- **Requests:** the main batch and the two searches with extras go out as three requests in parallel. In one request, GitHub returned 502s for prolific users, then "Resource limits for this query exceeded." The acceptance search adds no wall time, because the main batch takes longer.
+- **Removed:** `new-account-burst` and the `SearchNext` paging. `recent_repos` now comes from the newest 100 recent PRs only.
 
-**A. Spray (change 2).**
-- `metrics.go`: add an item search to the batch, `is:pr author:LOGIN -user:LOGIN is:public created:D180..D31`, newest 100. Store `SpraySampled` and `SprayUnlandedRepos` on `Global`.
-- `github.go`: item searches need `state` for PRs. Add a `searchReq.Detail` option that selects a richer fragment (`state mergedBy { login } reviews(states: APPROVED) { totalCount }`), so other searches don't pay for those fields.
-- `score.go`: a `Spray` component in Pattern using the curve above. Remove `new-account-burst` and its constants. Remove `SearchNext` paging if nothing else needs it, since it only existed for that flag. The "Last 30 days" report line stays, counted from the first page.
-- Tests: the curve at 0, 11, 20, and 50; a repo with a merge doesn't count; open PRs don't count; the windows don't overlap.
+### Known gaps
 
-**B. Elsewhere acceptance (change 3).**
-- `metrics.go`: add a detailed item search, `is:pr author:LOGIN -user:LOGIN is:public is:merged -repo:REPO`, newest 100. Count PRs merged by someone else or approved. Store `ElsewhereAccepted` and `ElsewhereSampled`.
-- `score.go`: "PRs merged elsewhere" uses `MergedElsewhere × accepted/sampled`, or `MergedElsewhere` when the sample is empty. The detail says "N merged · M% accepted by others."
-- Tests: a self-merged unapproved PR doesn't count, a self-merged approved PR does, and a PR merged by someone else does.
-
-**C. Heavy maintainer involvement (change 1).**
-- `github.go`: `HeavyPRs(repo, login)` searches `repo:REPO is:pr is:merged author:LOGIN`, the first 100 by `updated-desc`, with `number reviewThreads { totalCount }`. For PRs with 20 or more threads, it fetches commits in one aliased request using `prFields`.
-- `metrics.go`: a PR is heavy when 10 or more non-merge commits aren't owned by the user, using `ownedBy`. Logins ending in `[bot]` don't count. Store `HeavyPRs []{number, review_threads, maintainer_commits}`.
-- `score.go`: `CodeCredit = (PRsMerged − heavy) × AvgCredit`, where AvgCredit leaves out heavy PRs that are in the recent sample, and is 1 when nothing is left. Add the flag `heavy-maintainer-involvement`, listing the worst PR.
-- Tests: the 20-thread and 10-commit edges, own commits that don't count (G1's case), bot commits that don't count, and no double-counting when a heavy PR is in the recent sample.
-
-**D. Release.** Bump `schema_version` to 3 with its change history: `new-account-burst` removed, `heavy-maintainer-involvement` added, merged-elsewhere weighted by acceptance, and the new fields. Run the acceptance check, then tag.
-
-**Acceptance check.** `accept.py` and `baseline.json` sit with the private data. The baseline is v0.5.0's scores. The script rescores every labeled author with the local build and checks each "Accept if." Run it before merging each PR.
+- **A brand-new account with every PR still open** gets no spray line, because spray starts at day 31, and no flag. Only the not-landing prior applies, which is about -11 for 200 open PRs. The "Last 30 days" line still shows the account's age, its PR count, and how many repos the PRs went to. Once PRs close, not-landing takes over (about -30 for the README's example scheme).
+- **Spray is an estimate both ways.** A repo's merged PR can fall outside the newest 100, which overcounts. Closed PRs outside the sample are missed, which undercounts. The curve's cap limits the effect.
+- **Heavy review reads at most 100 commits.** For longer PRs, the report says the count covers the last 100.
 
 ## Results (v0.5.0 baseline compared with this build, 42 users)
 
-Every "Accept if" passes.
+Every "Accept if" passes. The check script, the baseline, and the label key name real people, so they stay in private storage, and others can't rerun this. Each criterion is written so it can be checked by hand with `gh averyindex --json`.
 
 | Label | Before | After | Why |
 |---|---|---|---|

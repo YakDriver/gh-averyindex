@@ -76,6 +76,10 @@ func TestMergedPRsFetchesCommitsOnlyForMostRecentlyMerged(t *testing.T) {
 			if !slices.Equal(asked, []int{9, 8}) {
 				t.Errorf("commits requested for %v, want [9 8] only", asked)
 			}
+			// Rework reads a PR from the start, where the author's work is.
+			if !strings.Contains(query, "commits(first: 100)") {
+				t.Errorf("rework should read the first commits:\n%s", query)
+			}
 			// Aliases arrive in the opposite order from the query.
 			return `{"data":{"repository":{
 				"pr1":{"number":8,"mergedAt":"2026-10-25T00:00:00Z","additions":10,"deletions":0,
@@ -264,6 +268,11 @@ func TestReviewedPRsFetchesCommitsOnlyForLongReviews(t *testing.T) {
 			}
 			return `{"data":{"search":{"nodes":[{"number":1,"reviewThreads":{"totalCount":3}},
 				{"number":2,"reviewThreads":{"totalCount":25}},{"number":3,"reviewThreads":{"totalCount":20}},{}]}}}`
+		}
+		// Maintainers' commits come after review, so a long PR is read from
+		// the end (Copilot on #28).
+		if !strings.Contains(query, "commits(last: 100)") {
+			t.Errorf("heavy check should read the last commits:\n%s", query)
 		}
 		if strings.Contains(query, "number: 1)") || !strings.Contains(query, "pr0: pullRequest(number: 2)") ||
 			!strings.Contains(query, "pr1: pullRequest(number: 3)") {

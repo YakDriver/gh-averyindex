@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -42,6 +43,7 @@ type fakeSource struct {
 	batches                   int
 	reviewed                  []rawPR
 	reviewedQuery             string
+	reviewedErr               error
 	details                   []string // queries of searches with extras
 }
 
@@ -84,7 +86,7 @@ func (f *fakeSource) MergedPRs(repo, q string, n int) (int, []rawPR, error) {
 
 func (f *fakeSource) ReviewedPRs(repo, q string, minThreads int) ([]rawPR, error) {
 	f.reviewedQuery = fmt.Sprintf("%s %s >=%d", repo, q, minThreads)
-	return f.reviewed, f.err
+	return f.reviewed, cmp.Or(f.reviewedErr, f.err)
 }
 
 func (f *fakeSource) ThumbsUp(q, author string) (int, bool, error) {
@@ -368,7 +370,7 @@ func TestPlural(t *testing.T) {
 	}
 }
 
-func TestCollectSendsSearchesInOneBatch(t *testing.T) {
+func TestCollectBatchesSearches(t *testing.T) {
 	src := &fakeSource{}
 	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
 		t.Fatal(err)
@@ -660,7 +662,7 @@ func TestFlags(t *testing.T) {
 		// recent PRs "mostly didn't land."
 		{"200 open, nothing resolved", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
 			PRsOpened: 200, PRsOpen: 200, RecentPRs: 200, RecentRepos: 40}}, nil},
-		{"heavy PR", Metrics{PRsOpened: 3, PRsMerged: 3, HeavyPRs: []HeavyPR{{1, 28, 57}}}, []string{flagHeavy}},
+		{"heavy PR", Metrics{PRsOpened: 3, PRsMerged: 3, HeavyPRs: []HeavyPR{{Number: 1, ReviewThreads: 28, MaintainerCommits: 57}}}, []string{flagHeavy}},
 		// Wide spray is a graded line, not a flag (tuning.md, H2f).
 		{"wide spray", Metrics{Threads: 1, Global: Global{AccountAgeDays: 2000, SprayRepos: 60, SpraySampled: 100}}, nil},
 		{"half of recent resolved merged", Metrics{Global: Global{AccountAgeDays: 3000,
@@ -1362,9 +1364,10 @@ func TestAcceptedByOthers(t *testing.T) {
 		{MergedBy: "u", Approvals: 1}, // self-merged after approval
 		{MergedBy: "maintainer"},      // merged by someone else
 		{MergedBy: ""},                // merger's account deleted
+		{MergedBy: "kubernetes-prow"}, // merged by a bot after /lgtm and /approve labels
 	}
-	if got := acceptedByOthers("u", items); got != 3 {
-		t.Errorf("acceptedByOthers() = %d, want 3", got)
+	if got := acceptedByOthers("u", items); got != 4 {
+		t.Errorf("acceptedByOthers() = %d, want 4", got)
 	}
 }
 
@@ -1417,7 +1420,7 @@ func TestCollectHeavyPRs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []HeavyPR{{43, 28, 10}}; !slices.Equal(m.HeavyPRs, want) {
+	if want := []HeavyPR{{Number: 43, ReviewThreads: 28, MaintainerCommits: 10}}; !slices.Equal(m.HeavyPRs, want) {
 		t.Errorf("heavy = %+v, want %+v", m.HeavyPRs, want)
 	}
 	if src.reviewedQuery != "o/r repo:o/r is:pr author:u is:merged >=20" {
@@ -1439,5 +1442,52 @@ func TestAvgCreditSkipsHeavy(t *testing.T) {
 	m.HeavyPRs = []HeavyPR{{Number: 1}, {Number: 2}}
 	if got := m.AvgCredit(); got != 1 {
 		t.Errorf("all sampled PRs heavy: AvgCredit() = %v, want 1", got)
+	}
+}
+
+func TestCollectHeavyCheckFailureKeepsReport(t *testing.T) {
+	var buf bytes.Buffer
+	old := notices
+	notices = &buf
+	defer func() { notices = old }()
+	src := &fakeSource{merged: 3, prs: []rawPR{{Number: 5}}, reviewedErr: errors.New("boom")}
+	src.search = map[string]fakeSearch{"|repo:o/r is:pr author:u": {total: 3}}
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatalf("a failed heavy check shouldn't fail the run: %v", err)
+	}
+	if !m.HeavyUnchecked || m.PRsMerged != 3 || len(m.RecentMerged) != 1 {
+		t.Errorf("metrics = %+v", m)
+	}
+	if !strings.Contains(buf.String(), "heavy maintainer involvement: boom") {
+		t.Errorf("notice = %q", buf.String())
+	}
+	var out bytes.Buffer
+	if err := renderText(&out, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Heavy maintainer involvement wasn't checked") {
+		t.Errorf("report doesn't say the check is missing:\n%s", out.String())
+	}
+}
+
+func TestRenderHeavyPRsOnce(t *testing.T) {
+	// Copilot on #28: a heavy PR in the recent sample was listed twice, once
+	// with its line-rework credit.
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 2, PRsMerged: 2,
+		RecentMerged: []MergedPR{{Number: 7, MergedAt: testNow, Rework: 0.07, Credit: 0.93}},
+		HeavyPRs: []HeavyPR{{Number: 7, ReviewThreads: 136, MaintainerCommits: 18},
+			{Number: 3, ReviewThreads: 21, MaintainerCommits: 12, CommitsTruncated: true}}}
+	var out bytes.Buffer
+	if err := renderText(&out, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if strings.Count(s, "#7 ") != 1 || strings.Contains(s, "credit 0.93") ||
+		!strings.Contains(s, "credit 0  (heavy: 136 review threads, 18 commits by others)") {
+		t.Errorf("heavy PR in the sample:\n%s", s)
+	}
+	if !strings.Contains(s, "(heavy: 21 review threads, 12 commits by others in the last 100)") {
+		t.Errorf("heavy PR outside the sample:\n%s", s)
 	}
 }

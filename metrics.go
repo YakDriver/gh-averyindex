@@ -172,6 +172,9 @@ type HeavyPR struct {
 	Number            int `json:"number"`
 	ReviewThreads     int `json:"review_threads"`
 	MaintainerCommits int `json:"maintainer_commits"`
+	// CommitsTruncated is set when the PR has more commits than were read,
+	// so MaintainerCommits counts only the last maxCommits.
+	CommitsTruncated bool `json:"commits_truncated,omitempty"`
 }
 
 // Metrics are the raw counts for one user in one repository.
@@ -202,9 +205,12 @@ type Metrics struct {
 	FirstAuthored *searchItem `json:"first_authored,omitempty"`
 	LastAuthored  *searchItem `json:"last_authored,omitempty"`
 
-	RecentMerged []MergedPR   `json:"recent_merged,omitempty"`
-	HeavyPRs     []HeavyPR    `json:"heavy_prs,omitempty"`
-	OpenPRs      []searchItem `json:"open_prs,omitempty"`
+	RecentMerged []MergedPR `json:"recent_merged,omitempty"`
+	HeavyPRs     []HeavyPR  `json:"heavy_prs,omitempty"`
+	// HeavyUnchecked is set when the check for heavy maintainer
+	// involvement failed, so the report is missing it.
+	HeavyUnchecked bool         `json:"heavy_unchecked,omitempty"`
+	OpenPRs        []searchItem `json:"open_prs,omitempty"`
 
 	Global Global `json:"global"`
 }
@@ -247,7 +253,22 @@ func (m Metrics) AvgCredit() float64 {
 }
 
 func (m Metrics) heavy(number int) bool {
-	return slices.ContainsFunc(m.HeavyPRs, func(h HeavyPR) bool { return h.Number == number })
+	_, ok := m.heavyPR(number)
+	return ok
+}
+
+func (m Metrics) heavyPR(number int) (HeavyPR, bool) {
+	i := slices.IndexFunc(m.HeavyPRs, func(h HeavyPR) bool { return h.Number == number })
+	if i < 0 {
+		return HeavyPR{}, false
+	}
+	return m.HeavyPRs[i], true
+}
+
+// recent reports whether number is one of the recent merged PRs checked for
+// rework.
+func (m Metrics) recent(number int) bool {
+	return slices.ContainsFunc(m.RecentMerged, func(pr MergedPR) bool { return pr.Number == number })
 }
 
 // CodeCredit is merged PRs other than heavy ones, discounted by the average
@@ -357,11 +378,13 @@ func sprayRepos(items []searchItem) int {
 }
 
 // acceptedByOthers counts merged PRs that someone besides user merged or
-// approved.
+// approved. Bot merges count: bots like Prow and merge queues merge after
+// people review, often by label rather than GitHub approval. A merger
+// whose account was deleted counts too, since it can't be the user.
 func acceptedByOthers(user string, items []searchItem) int {
 	n := 0
 	for _, it := range items {
-		if !strings.EqualFold(it.MergedBy, user) || it.Approvals > 0 {
+		if it.Approvals > 0 || !strings.EqualFold(it.MergedBy, user) {
 			n++
 		}
 	}
@@ -489,10 +512,10 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	var bx batch
 	sprayFrom := now.AddDate(0, 0, -sprayDays).Format(time.DateOnly)
 	sprayTo := now.AddDate(0, 0, -recentDays-1).Format(time.DateOnly)
-	var spray searchResult
-	bx.extra(&spray, extraState, global+" created:"+sprayFrom+".."+sprayTo, spraySample)
-	var accepted searchResult
-	bx.extra(&accepted, extraAccepted, global+" is:merged -repo:"+repo, acceptedSample)
+	var sprayed searchResult
+	bx.extra(&sprayed, extraState, global+" created:"+sprayFrom+".."+sprayTo, spraySample)
+	var merged searchResult
+	bx.extra(&merged, extraAccepted, global+" is:merged -repo:"+repo, acceptedSample)
 
 	var contributorTotal int
 	var contributorItems []searchItem
@@ -526,8 +549,8 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 
 	g.RecentPRs = recentFirst.Total
 	countRecentRepos(recentFirst.Items, g)
-	g.SpraySampled, g.SprayRepos = len(spray.Items), sprayRepos(spray.Items)
-	g.AcceptedSampled, g.AcceptedElsewhere = len(accepted.Items), acceptedByOthers(user, accepted.Items)
+	g.SpraySampled, g.SprayRepos = len(sprayed.Items), sprayRepos(sprayed.Items)
+	g.AcceptedSampled, g.AcceptedElsewhere = len(merged.Items), acceptedByOthers(user, merged.Items)
 	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
 		return m, err
 	}
@@ -540,7 +563,18 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	if m.PRsOpened == 0 {
 		return m, nil
 	}
-	total, raw, err := src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
+	// Rework and heavy review use the same PRs but no shared results, so
+	// they're fetched together.
+	var (
+		total     int
+		raw       []rawPR
+		reviewed  []rawPR
+		reviewErr error
+		wg        sync.WaitGroup
+	)
+	wg.Go(func() { reviewed, reviewErr = src.ReviewedPRs(repo, prs+" is:merged", heavyMinThreads) })
+	total, raw, err = src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
+	wg.Wait()
 	if err != nil {
 		return m, err
 	}
@@ -558,16 +592,17 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 			CommitsTruncated: pr.CommitsTruncated,
 		})
 	}
-	if total == 0 {
+	// A failed heavy check leaves the rest of the report useful, so it's
+	// reported as missing instead of failing the run.
+	if reviewErr != nil {
+		fmt.Fprintf(notices, "Couldn't check merged PRs for heavy maintainer involvement: %v\n", reviewErr)
+		m.HeavyUnchecked = true
 		return m, nil
-	}
-	reviewed, err := src.ReviewedPRs(repo, prs+" is:merged", heavyMinThreads)
-	if err != nil {
-		return m, err
 	}
 	for _, pr := range reviewed {
 		if n := maintainerCommits(user, pr); n >= heavyMinCommits {
-			m.HeavyPRs = append(m.HeavyPRs, HeavyPR{Number: pr.Number, ReviewThreads: pr.ReviewThreads, MaintainerCommits: n})
+			m.HeavyPRs = append(m.HeavyPRs, HeavyPR{Number: pr.Number, ReviewThreads: pr.ReviewThreads,
+				MaintainerCommits: n, CommitsTruncated: pr.CommitsTruncated})
 		}
 	}
 	return m, nil

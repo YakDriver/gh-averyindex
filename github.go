@@ -443,13 +443,14 @@ query($q: String!, $n: Int!) {
   }
 }`
 
-// prFields is what rework needs from each PR.
+// prFields is what rework needs from each PR. %s picks the first or last
+// commits when there are more than maxCommits.
 const prFields = `
 number
 mergedAt
 additions
 deletions
-commits(first: 100) {
+commits(%s: 100) {
   totalCount
   nodes {
     commit {
@@ -538,12 +539,15 @@ func (g *gitHub) MergedPRs(repo, query string, n int) (int, []rawPR, error) {
 		candidates = append(candidates, rawPR{Number: c.Number, MergedAt: c.MergedAt})
 	}
 	numbers := mostRecentlyMerged(candidates, n)
-	prs, err := g.prsWithCommits(repo, numbers)
+	prs, err := g.prsWithCommits(repo, numbers, "first")
 	return cand.Search.IssueCount, prs, err
 }
 
 // prsWithCommits fetches PRs by number in one request, with their commits.
-func (g *gitHub) prsWithCommits(repo string, numbers []int) ([]rawPR, error) {
+//
+// Rework reads the first commits, where the author's work is. Heavy review
+// reads the last, because maintainers' commits come after review.
+func (g *gitHub) prsWithCommits(repo string, numbers []int, commits string) ([]rawPR, error) {
 	if len(numbers) == 0 {
 		return nil, nil
 	}
@@ -551,7 +555,7 @@ func (g *gitHub) prsWithCommits(repo string, numbers []int) ([]rawPR, error) {
 	var q strings.Builder
 	q.WriteString("query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n")
 	for i, num := range numbers {
-		fmt.Fprintf(&q, "    pr%d: pullRequest(number: %d) {%s}\n", i, num, prFields)
+		fmt.Fprintf(&q, "    pr%d: pullRequest(number: %d) {%s}\n", i, num, fmt.Sprintf(prFields, commits))
 	}
 	q.WriteString("  }\n}")
 
@@ -610,7 +614,7 @@ func (g *gitHub) ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error
 	// request small for someone with many long reviews.
 	slices.SortStableFunc(numbers, func(a, b int) int { return threads[b] - threads[a] })
 	numbers = numbers[:min(len(numbers), maxHeavyChecked)]
-	prs, err := g.prsWithCommits(repo, numbers)
+	prs, err := g.prsWithCommits(repo, numbers, "last")
 	for i := range prs {
 		prs[i].ReviewThreads = threads[prs[i].Number]
 	}
