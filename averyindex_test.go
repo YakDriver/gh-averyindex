@@ -194,8 +194,8 @@ func TestCollectGlobalScope(t *testing.T) {
 			global = append(global, q)
 		}
 	}
-	if len(global) != 9 {
-		t.Fatalf("got %d global queries, want 9: %q", len(global), global)
+	if len(global) != 11 {
+		t.Fatalf("got %d global queries, want 11: %q", len(global), global)
 	}
 	for _, q := range global {
 		// Own repos are excluded because anyone can merge their own PRs (#1).
@@ -465,27 +465,6 @@ func TestPRsClosedUnmergedNeverNegative(t *testing.T) {
 	}
 }
 
-func TestDriveBy(t *testing.T) {
-	tests := []struct {
-		name string
-		m    Metrics
-		want bool
-	}{
-		{"PRs only", Metrics{PRsOpened: 3}, true},
-		{"PRs and a comment", Metrics{PRsOpened: 3, Threads: 1}, false},
-		{"merged PRs, nothing else", Metrics{PRsOpened: 2, PRsMerged: 2}, false},
-		{"nothing at all", Metrics{}, false},
-		{"issues only", Metrics{Issues: 2}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.m.DriveBy(); got != tt.want {
-				t.Errorf("DriveBy() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestScore(t *testing.T) {
 	reworked := []MergedPR{{Credit: 0}, {Credit: 0}, {Credit: 0}}
 	tests := []struct {
@@ -498,7 +477,11 @@ func TestScore(t *testing.T) {
 		{"three merged", Metrics{PRsOpened: 3, PRsMerged: 3}, 24},
 		{"three merged, all rewritten", Metrics{PRsOpened: 3, PRsMerged: 3, RecentMerged: reworked}, 0},
 		{"one closed unmerged", Metrics{PRsOpened: 1}, -3},
-		{"open PRs are neutral", Metrics{PRsOpened: 5, PRsOpen: 5}, 0},
+		{"a few open PRs are neutral", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
+		// 2 beyond the grace of 3, with nothing earned.
+		{"many open, nothing earned", Metrics{PRsOpened: 5, PRsOpen: 5}, -6},
+		// Earned by 2 merges (6 PRs' worth) and 3 threads.
+		{"many open, earned", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 23},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -531,7 +514,7 @@ func TestScoreGroups(t *testing.T) {
 			groups = append(groups, c.Group)
 		}
 	}
-	if !slices.Equal(groups, []string{groupHere, groupElsewhere, groupPattern}) {
+	if !slices.Equal(groups, []string{groupHere, groupElsewhere, groupBurden}) {
 		t.Errorf("groups = %v", groups)
 	}
 }
@@ -552,8 +535,9 @@ func TestScoreElsewhereCapped(t *testing.T) {
 	if got := elsewherePoints(r); math.Abs(got-defaultWeights.ElsewhereCap) > 1e-9 {
 		t.Errorf("elsewhere = %v, want cap %v", got, defaultWeights.ElsewhereCap)
 	}
-	if r.Tier != "Contributor" {
-		t.Errorf("famous but new here: tier %q, want Contributor", r.Tier)
+	// Famous elsewhere but new here: benefit of the doubt, nothing more.
+	if r.Score != 20 || r.Here != 0 || r.Elsewhere != 20 {
+		t.Errorf("famous but new here: %d (here %d, elsewhere %d), want 20 from elsewhere", r.Score, r.Here, r.Elsewhere)
 	}
 
 	newbie := Metrics{Global: Global{AccountAgeDays: 30}}
@@ -565,11 +549,11 @@ func TestScoreElsewhereCapped(t *testing.T) {
 func TestScoreNotLanding(t *testing.T) {
 	notLanding := func(g Global) float64 {
 		for _, c := range score(Metrics{Global: g}, defaultWeights).Components {
-			if c.Group == groupPattern {
+			if c.Label == "Recent PRs not landing" {
 				return c.Points
 			}
 		}
-		t.Fatal("no pattern component")
+		t.Fatal("no not-landing component")
 		return 0
 	}
 
@@ -623,59 +607,7 @@ func TestScoreDormantVeteranStaysStrong(t *testing.T) {
 	dormant := Metrics{PRsOpened: 40, PRsMerged: 35, Threads: 60, Issues: 10, ThumbsUp: 30,
 		Global: Global{AccountAgeDays: 3000, PRsOpened: 300, PRsMerged: 280, MergedElsewhere: 245}}
 	if r := score(dormant, defaultWeights); r.Score < 80 {
-		t.Errorf("dormant veteran scored %d (%s), want 80+", r.Score, r.Tier)
-	}
-}
-
-func flagCodes(m Metrics) []string {
-	var codes []string
-	for _, f := range score(m, defaultWeights).Flags {
-		codes = append(codes, f.Code)
-	}
-	return codes
-}
-
-func TestFlags(t *testing.T) {
-	tests := []struct {
-		name string
-		m    Metrics
-		want []string
-	}{
-		{"nothing", Metrics{}, nil},
-		{"honest newcomer, one closed PR", Metrics{PRsOpened: 1, Threads: 2,
-			Global: Global{AccountAgeDays: 1500, PRsOpened: 1, RecentPRs: 1, RecentClosedUnmerged: 1}}, nil},
-		{"spray, mostly closed", Metrics{PRsOpened: 2, Global: Global{AccountCreated: testNow, AccountAgeDays: 17,
-			PRsOpened: 108, PRsMerged: 3, PRsOpen: 82, MergedElsewhere: 3,
-			RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23, RecentRepos: 22}},
-			[]string{flagNotLanding, flagDriveBy}},
-		// The gap left by #2: nothing closed yet, so no penalty to speak of.
-		{"spray, all still open", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
-			PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}, nil},
-		{"new account, few repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 30,
-			PRsOpened: 30, PRsOpen: 30, RecentPRs: 30, RecentRepos: 3}}, nil},
-		{"old account, many repos", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 2000,
-			PRsOpened: 60, PRsMerged: 50, RecentPRs: 40, RecentMerged: 35, RecentRepos: 30}}, nil},
-		{"slow review queue", Metrics{PRsOpened: 10, PRsMerged: 3, PRsOpen: 7, Threads: 5,
-			Global: Global{AccountCreated: testNow, AccountAgeDays: 1487, PRsOpened: 116, PRsMerged: 38, PRsOpen: 72,
-				MergedElsewhere: 35, RecentPRs: 83, RecentMerged: 5, RecentClosedUnmerged: 6, RecentRepos: 8}}, nil},
-		// Copilot on #18: a big penalty with nothing resolved can't claim
-		// recent PRs "mostly didn't land."
-		{"200 open, nothing resolved", Metrics{Threads: 1, Global: Global{AccountCreated: testNow, AccountAgeDays: 3,
-			PRsOpened: 200, PRsOpen: 200, RecentPRs: 200, RecentRepos: 40}}, nil},
-		{"heavy PR", Metrics{PRsOpened: 3, PRsMerged: 3, HeavyPRs: []HeavyPR{{Number: 1, ReviewThreads: 28, MaintainerCommits: 57}}}, []string{flagHeavy}},
-		// Wide spray is a graded line, not a flag (tuning.md, H2f).
-		{"wide spray", Metrics{Threads: 1, Global: Global{AccountAgeDays: 2000, SprayRepos: 60, SpraySampled: 100}}, nil},
-		{"half of recent resolved merged", Metrics{Global: Global{AccountAgeDays: 3000,
-			PRsOpened: 400, PRsMerged: 20, PRsOpen: 0, RecentPRs: 300, RecentMerged: 10, RecentClosedUnmerged: 10}}, nil},
-		{"drive-by only", Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 400}}, []string{flagDriveBy}},
-		{"merged here, nothing else", Metrics{PRsOpened: 2, PRsMerged: 2, Global: Global{AccountAgeDays: 5000}}, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := flagCodes(tt.m); !slices.Equal(got, tt.want) {
-				t.Errorf("flags = %v, want %v", got, tt.want)
-			}
-		})
+		t.Errorf("dormant veteran scored %d (%s), want 80+", r.Score, r.Reason)
 	}
 }
 
@@ -685,44 +617,6 @@ func repoItems(n int, repo func(i int) string) []searchItem {
 		items[i] = searchItem{Repo: repo(i)}
 	}
 	return items
-}
-
-func TestFlagsDontChangeScore(t *testing.T) {
-	m := Metrics{PRsOpened: 1, PRsOpen: 1, Global: Global{AccountAgeDays: 3, PRsOpened: 100, PRsOpen: 100, RecentPRs: 100, RecentRepos: 40}}
-	r := score(m, defaultWeights)
-	var sum float64
-	for _, c := range r.Components {
-		sum += c.Points
-	}
-	if len(r.Flags) == 0 || int(math.Round(sum)) != r.Score {
-		t.Errorf("flags %v, components sum %.1f, score %d", r.Flags, sum, r.Score)
-	}
-}
-
-func TestRenderFlagsInHeader(t *testing.T) {
-	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 14, PRsMerged: 14, Threads: 1,
-		HeavyPRs: []HeavyPR{{Number: 7, ReviewThreads: 21, MaintainerCommits: 12}, {Number: 9, ReviewThreads: 28, MaintainerCommits: 57}}}
-	var buf bytes.Buffer
-	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(buf.String(), "\n")
-	want := "  ⚠ Heavy maintainer involvement on 2 merged PRs (#9: 28 review threads, 57 commits by others)"
-	if len(lines) < 2 || lines[1] != want {
-		t.Errorf("line 2 = %q, want %q", lines[1], want)
-	}
-}
-
-func TestRenderJSONFlags(t *testing.T) {
-	var buf bytes.Buffer
-	m := Metrics{User: "u", Repo: "o/r"}
-	if err := renderJSON(&buf, m, score(m, defaultWeights), testMeta); err != nil {
-		t.Fatal(err)
-	}
-	// An empty list, not null, so scripts can always iterate it.
-	if !strings.Contains(buf.String(), `"flags": []`) {
-		t.Errorf("missing empty flags array:\n%s", buf.String())
-	}
 }
 
 func TestParseArgsVersion(t *testing.T) {
@@ -951,11 +845,13 @@ func TestRenderTextPointsAtScore(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(buf.String(), "\n")
-	if want := "u in o/r  ·  Contributor  ·  ➜ averyindex 24"; lines[0] != want {
+	if want := "u in o/r  ·  ➜ averyindex 24"; lines[0] != want {
 		t.Errorf("header = %q, want %q", lines[0], want)
 	}
-	// The final score row lines up with the component rows above it, even
-	// with an 11-character tier like "Contributor".
+	if want := "  Here +24  ·  Elsewhere +0  ·  Burden +0  ·  3 PRs merged here"; lines[1] != want {
+		t.Errorf("parts = %q, want %q", lines[1], want)
+	}
+	// The final score row lines up with the component rows above it.
 	var row, above string
 	for i, l := range lines {
 		if strings.HasPrefix(l, "➜ averyindex") {
@@ -1073,7 +969,7 @@ func TestRenderTextHighlightsScore(t *testing.T) {
 	}
 	// The header score and the final score row are highlighted, and nothing
 	// else changes.
-	header := "u in o/r  ·  Contributor  ·  \033[1m➜ averyindex 24\033[0m\n"
+	header := "u in o/r  ·  \033[1m➜ averyindex 24\033[0m\n"
 	if !strings.HasPrefix(color.String(), header) {
 		t.Errorf("header = %q", strings.SplitN(color.String(), "\n", 2)[0])
 	}
@@ -1111,14 +1007,6 @@ func TestScoreHelpfulBeatsDriveBy(t *testing.T) {
 	}
 }
 
-func TestTierFor(t *testing.T) {
-	for score, want := range map[int]string{-10: "Novice", 0: "Novice", 14: "Novice", 15: "Contributor", 40: "Regular", 149: "Veteran", 150: "Core", 900: "Core"} {
-		if got := tierFor(score); got != want {
-			t.Errorf("tierFor(%d) = %q, want %q", score, got, want)
-		}
-	}
-}
-
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1131,6 +1019,8 @@ func TestParseArgs(t *testing.T) {
 		{"flags first", []string{"-R", "o/r", "--json", "u"}, options{repo: "o/r", json: true, user: "u"}, false},
 		{"flags after user", []string{"u", "--repo", "o/r"}, options{repo: "o/r", user: "u"}, false},
 		{"no user", []string{"--json"}, options{}, true},
+		{"explain", []string{"--explain", "u"}, options{explain: true, user: "u"}, false},
+		{"explain and json", []string{"--explain", "--json", "u"}, options{}, true},
 		{"pr", []string{"--pr", "50687"}, options{number: 50687}, false},
 		{"pr with repo and json", []string{"-R", "o/r", "--json", "--pr", "7"}, options{repo: "o/r", json: true, number: 7}, false},
 		{"pr and user", []string{"--pr", "7", "u"}, options{}, true},
@@ -1237,7 +1127,7 @@ func TestRenderText(t *testing.T) {
 		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
 		`Last 30 days +150 PRs · 0 merged · 0 closed unmerged · 150 open`,
 		`\n +across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
-		`Cap \(elsewhere is at most \+20\) +-9\.7`,
+		`Cap \(benefit of the doubt is at most \+20\) +-9\.7`,
 		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {
 		if !regexp.MustCompile(want).MatchString(out) {
@@ -1251,21 +1141,6 @@ func TestRenderText(t *testing.T) {
 	}
 	if strings.Contains(out, "Drive-by") {
 		t.Errorf("drive-by shown for a participating user:\n%s", out)
-	}
-}
-
-func TestRenderTextDriveBy(t *testing.T) {
-	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 2, PRsOpen: 2,
-		FirstAuthored: &searchItem{Number: 1, CreatedAt: day("2026-10-01"), IsPR: true}}
-	var buf bytes.Buffer
-	if err := renderText(&buf, m, score(m, defaultWeights), testMeta); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	for _, want := range []string{"Novice", "⚠ Drive-by:", "PR #1, 2026-10-01"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
 	}
 }
 
@@ -1297,8 +1172,14 @@ func TestRenderJSON(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
 	}
-	if got["user"] != "u" || got["averyindex"] != float64(24) || got["tier"] != "Contributor" {
+	if got["user"] != "u" || got["averyindex"] != float64(24) || got["here"] != float64(24) ||
+		got["burden"] != float64(0) || got["reason"] != "3 PRs merged here" {
 		t.Errorf("unexpected JSON: %s", buf.String())
+	}
+	for _, gone := range []string{"tier", "flags"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("%s is gone in schema 4: %s", gone, buf.String())
+		}
 	}
 	if _, ok := got["first_authored"]; ok {
 		t.Errorf("nil first_authored should be omitted: %s", buf.String())
@@ -1489,5 +1370,94 @@ func TestRenderHeavyPRsOnce(t *testing.T) {
 	}
 	if !strings.Contains(s, "(heavy: 21 review threads, 12 commits by others in the last 100)") {
 		t.Errorf("heavy PR outside the sample:\n%s", s)
+	}
+}
+
+func TestUnearned(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		m    Metrics
+		want int
+	}{
+		{"a few waiting", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
+		// A1's case: 37 open, 3 closed, 1 merged, nothing else.
+		{"asking far beyond earned", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37}, 34},
+		{"slow queue, long record", Metrics{PRsOpened: 280, PRsMerged: 252, PRsOpen: 28, Threads: 300}, 0},
+		{"engagement earns review", Metrics{PRsOpened: 10, PRsOpen: 10, Issues: 4, Threads: 3}, 0},
+	} {
+		if got := tt.m.Unearned(); got != tt.want {
+			t.Errorf("%s: Unearned() = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+	g := Global{RecentElsewhereOpen: 28, RecentElsewhereMerged: 1, RecentElsewhereThreads: 2}
+	if got := g.UnearnedElsewhere(); got != 20 {
+		t.Errorf("UnearnedElsewhere() = %d, want 20 (28 open − 3 − 2 − grace 3)", got)
+	}
+}
+
+func TestCollectElsewhereEngagementQueries(t *testing.T) {
+	src := &fakeSource{}
+	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"|is:pr author:u is:public -user:u -repo:o/r created:>=2026-09-29 is:open",
+		"|is:pr author:u is:public -user:u -repo:o/r created:>=2026-09-29 is:merged",
+		"|is:issue author:u is:public -user:u -repo:o/r created:>=2026-09-29",
+		"|commenter:u -author:u -reviewed-by:u is:public -user:u -repo:o/r updated:>=2026-09-29",
+		"|is:pr reviewed-by:u -author:u is:public -user:u -repo:o/r updated:>=2026-09-29",
+	} {
+		if !slices.Contains(src.queries, want) {
+			t.Errorf("missing query %q", want)
+		}
+	}
+}
+
+func TestReason(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		m    Metrics
+		want string
+	}{
+		{"nothing", Metrics{}, "no activity here or elsewhere"},
+		{"merged work", Metrics{PRsOpened: 3, PRsMerged: 3}, "3 PRs merged here"},
+		{"asking far beyond earned", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2},
+			"41 PRs here, 1 merged, no issues, comments, or reviews"},
+		// A cost that's small next to what was earned isn't the story.
+		{"veteran with closed PRs", Metrics{PRsOpened: 1800, PRsMerged: 1686, PRsOpen: 10, Reviews: 1117},
+			"1,686 PRs merged here"},
+		{"heavy PR", Metrics{PRsOpened: 1, PRsMerged: 1, HeavyPRs: []HeavyPR{{Number: 1}}},
+			"1 merged PR here needed heavy maintainer work"},
+		{"spray elsewhere", Metrics{Global: Global{AccountAgeDays: 2000, SprayRepos: 30, SpraySampled: 100}},
+			"PRs closed unmerged in 30 repos elsewhere"},
+	} {
+		if got := score(tt.m, defaultWeights).Reason; got != tt.want {
+			t.Errorf("%s: reason = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestRenderSummaryIsTwoLines(t *testing.T) {
+	m := Metrics{User: "u", Repo: "o/r", PRsOpened: 41, PRsMerged: 1, PRsOpen: 37}
+	var buf bytes.Buffer
+	if err := renderSummary(&buf, m, score(m, defaultWeights), testMeta); err != nil {
+		t.Fatal(err)
+	}
+	want := "u in o/r  ·  ➜ averyindex -15\n" +
+		"  Here +12  ·  Elsewhere +0  ·  Burden -27  ·  41 PRs here, 1 merged, no issues, comments, or reviews\n"
+	if buf.String() != want {
+		t.Errorf("summary:\n%s\nwant:\n%s", buf.String(), want)
+	}
+}
+
+func TestScorePartsAddUp(t *testing.T) {
+	m := Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2,
+		Global: Global{AccountAgeDays: 1500, MergedElsewhere: 37, RecentPRs: 69, RecentMerged: 1, RecentClosedUnmerged: 4}}
+	r := score(m, defaultWeights)
+	if r.Score != r.Here+r.Elsewhere+r.Burden {
+		t.Errorf("score %d != here %d + elsewhere %d + burden %d", r.Score, r.Here, r.Elsewhere, r.Burden)
+	}
+	if r.Burden > 0 {
+		t.Errorf("burden is positive: %d", r.Burden)
 	}
 }

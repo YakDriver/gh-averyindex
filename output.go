@@ -12,11 +12,24 @@ import (
 	"unicode/utf8"
 )
 
+// renderSummary prints the score, its three parts, and the biggest factor.
+// It's the default because a maintainer may run this many times a day.
+func renderSummary(w io.Writer, m Metrics, r Result, md meta) error {
+	_, err := fmt.Fprintf(w, "%s in %s  ·  %s\n  %s\n", m.User, m.Repo,
+		highlight(fmt.Sprintf("%s averyindex %d", scorePointer, r.Score), md.Color), parts(r))
+	return err
+}
+
+// parts is the three scores and the reason, such as
+// "Here +20 · Elsewhere +0 · Burden -27 · 41 PRs here, 1 merged, ...".
+func parts(r Result) string {
+	return fmt.Sprintf("Here %+d  ·  Elsewhere %+d  ·  Burden %+d  ·  %s", r.Here, r.Elsewhere, r.Burden, r.Reason)
+}
+
+// renderText prints the full report behind the score (--explain).
 func renderText(w io.Writer, m Metrics, r Result, md meta) error {
-	fmt.Fprintf(w, "%s in %s  ·  %s  ·  %s\n", m.User, m.Repo, r.Tier,
-		highlight(fmt.Sprintf("%s averyindex %d", scorePointer, r.Score), md.Color))
-	for _, f := range r.Flags {
-		fmt.Fprintf(w, "  ⚠ %s\n", f.Message)
+	if err := renderSummary(w, m, r, md); err != nil {
+		return err
 	}
 
 	fmt.Fprintln(w, "\nParticipation")
@@ -57,10 +70,11 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 		width = max(width, utf8.RuneCountInString(labels[i])+2)
 	}
 	group := ""
+	totals := map[string]int{groupHere: r.Here, groupElsewhere: r.Elsewhere, groupBurden: r.Burden}
 	for i, c := range r.Components {
 		if c.Group != group {
 			group = c.Group
-			fmt.Fprintf(w, "  %s\n", group)
+			fmt.Fprintf(w, "  %s %+d\n", group, totals[group])
 		}
 		n := count(c.Count)
 		if c.Label == "Cap" {
@@ -68,11 +82,9 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 		}
 		fmt.Fprintf(w, "    %s%9s  %7s\n", pad(labels[i], width-2), n, signed(c.Points))
 	}
-	// The pointer takes the place of the two-space indent, and a tier name
-	// wider than the count column (such as "Contributor") borrows from the
-	// label padding, so the score lines up under the points.
-	labelWidth := width - max(0, utf8.RuneCountInString(r.Tier)-9)
-	fmt.Fprintf(w, "%s\n", highlight(fmt.Sprintf("%s %s%9s  %7d", scorePointer, pad("averyindex", labelWidth), r.Tier, r.Score), md.Color))
+	// The pointer takes the place of the two-space indent, so the score
+	// lines up under the points.
+	fmt.Fprintf(w, "%s\n", highlight(fmt.Sprintf("%s %s%9s  %7d", scorePointer, pad("averyindex", width), "", r.Score), md.Color))
 
 	fmt.Fprintf(w, "\naveryindex %s · %s\n", md.Version, md.GeneratedAt.UTC().Format("2006-01-02 15:04 MST"))
 	return nil

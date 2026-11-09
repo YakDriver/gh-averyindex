@@ -3,21 +3,22 @@ package main
 import (
 	"fmt"
 	"math"
-	"slices"
 )
 
-// The score has three groups:
+// averyindex is the sum of three scores (docs/design/scoring-v2.md):
 //
-//   - Here: work in this repository. This is most of the score.
-//   - Elsewhere: account age and PRs merged in other repositories. This gives
-//     an established developer some benefit of the doubt in a repo they're new
-//     to. It's capped so it can't substitute for work here.
-//   - Pattern: penalties for opening many PRs that don't land, in the last
-//     30 days and across repos over the 150 days before that. It's uncapped.
+//   - Here: what the user has given this repository. This is most of the
+//     score.
+//   - Elsewhere: the user's record outside this repository. Its positive
+//     part is capped, so it gives an established developer some benefit of
+//     the doubt without standing in for work here. Its negative part, for
+//     PRs that don't land or ask for review that wasn't earned, isn't.
+//   - Burden: review the user has asked for here and not earned. It's never
+//     positive.
 const (
 	groupHere      = "Here"
 	groupElsewhere = "Elsewhere"
-	groupPattern   = "Pattern"
+	groupBurden    = "Burden"
 )
 
 // Weights are points per doubling of each count. Every count goes through
@@ -28,17 +29,13 @@ const (
 // Signals that depend on someone else's judgment (a maintainer merged it and
 // didn't rewrite it, other users upvoted it) weigh more than signals the user
 // produces alone (comments, issues), because they're harder to inflate.
-//
-// These are a first guess. Tune them by scoring accounts you already have
-// opinions about until the ranking matches your judgment.
 type Weights struct {
 	// Here.
-	Code           float64
-	ThumbsUp       float64
-	Reviews        float64
-	Threads        float64
-	Issues         float64
-	ClosedUnmerged float64
+	Code     float64
+	ThumbsUp float64
+	Reviews  float64
+	Threads  float64
+	Issues   float64
 
 	// Elsewhere. AccountAge is per doubling of account age in months.
 	AccountAge      float64
@@ -46,39 +43,42 @@ type Weights struct {
 	ProjectStars    float64
 	Contributors    float64
 	ElsewhereCap    float64
-
-	// Pattern. NotLanding is multiplied by log2(1 + PRs opened in the last
-	// 30 days) and by (1 - landing rate)², so it only bites when volume is
-	// high and PRs aren't landing. See Global.LandingRate.
+	// NotLanding is multiplied by log2(1 + PRs opened in the last 30 days)
+	// and by (1 - landing rate)², so it only bites when volume is high and
+	// PRs aren't landing. See Global.LandingRate.
 	NotLanding float64
 	// Spray is a logistic curve in the number of repos where PRs were
 	// closed without landing: about SprayMax/2 at SprayMid repos, with
-	// SpraySteep setting how quickly it rises. A few such repos cost almost
-	// nothing, and it can't exceed SprayMax however wide the spray.
+	// SpraySteep setting how quickly it rises.
 	SprayMax   float64
 	SprayMid   float64
 	SpraySteep float64
+
+	// Burden, and the matching line in Elsewhere. Unearned is per doubling
+	// of PRs that asked for review beyond what the user earned.
+	ClosedUnmerged float64
+	Unearned       float64
 }
 
 var defaultWeights = Weights{
-	Code:           12,
-	ThumbsUp:       5,
-	Reviews:        5,
-	Threads:        2,
-	Issues:         2,
-	ClosedUnmerged: -3,
+	Code:     12,
+	ThumbsUp: 5,
+	Reviews:  5,
+	Threads:  2,
+	Issues:   2,
 
 	AccountAge:      1.5,
 	MergedElsewhere: 4,
 	ProjectStars:    2,
 	Contributors:    4,
 	ElsewhereCap:    20,
+	NotLanding:      -6,
+	SprayMax:        -15,
+	SprayMid:        20,
+	SpraySteep:      4,
 
-	NotLanding: -6,
-
-	SprayMax:   -15,
-	SprayMid:   20,
-	SpraySteep: 4,
+	ClosedUnmerged: -3,
+	Unearned:       -4,
 }
 
 // sprayPoints is the spray penalty for n repos, shifted so 0 repos is 0.
@@ -87,99 +87,29 @@ func sprayPoints(n int, w Weights) float64 {
 	return curve(float64(n)) - curve(0)
 }
 
-// tiers are minimum scores for each tier, highest first. Anything below the
-// last one is "Novice".
-var tiers = []struct {
-	min  int
-	name string
-}{
-	{150, "Core"},
-	{80, "Veteran"},
-	{40, "Regular"},
-	{15, "Contributor"},
-}
-
-func tierFor(score int) string {
-	for _, t := range tiers {
-		if score >= t.min {
-			return t.name
-		}
-	}
-	return "Novice"
-}
-
 // Component is one line of the score breakdown.
 type Component struct {
-	Group  string `json:"group"`
-	Label  string `json:"label"`
-	Detail string `json:"detail,omitempty"`
-	Count  float64
-	Points float64
+	Group  string  `json:"group"`
+	Label  string  `json:"label"`
+	Detail string  `json:"detail,omitempty"`
+	Count  float64 `json:"count"`
+	Points float64 `json:"points"`
+
+	// why describes the component in a few words for the summary line, or
+	// is empty if it's never the reason.
+	why string
 }
 
-// Result is the score and the components that produced it.
+// Result is the score, its three parts, and the components that produced
+// them. Score is the sum of the rounded parts, so the summary adds up.
 type Result struct {
 	Components []Component `json:"components"`
+	Here       int         `json:"here"`
+	Elsewhere  int         `json:"elsewhere"`
+	Burden     int         `json:"burden"`
 	Score      int         `json:"averyindex"`
-	Tier       string      `json:"tier"`
-	Flags      []Flag      `json:"flags"`
-}
-
-// Flag is something a maintainer should look at more closely. Flags state
-// facts; they don't change the score.
-type Flag struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-const (
-	flagNotLanding = "not-landing"
-	flagDriveBy    = "drive-by"
-	flagHeavy      = "heavy-maintainer-involvement"
-)
-
-const (
-	// notLandingFlagPoints is how negative the Pattern penalty must be, and
-	// it must also outweigh everything else, before it's flagged. The floor
-	// keeps a newcomer with one closed PR from being flagged.
-	notLandingFlagPoints = -10
-	// notLandingMinResolved is how many recent PRs must have resolved before
-	// the flag can say they mostly didn't land. The penalty can be large with
-	// nothing resolved (the 50% prior times high volume), but then there's no
-	// recent outcome to report, and the breakdown shows the penalty.
-	notLandingMinResolved = 5
-)
-
-func flags(m Metrics, r Result) []Flag {
-	g := m.Global
-	var pattern, rest float64
-	for _, c := range r.Components {
-		if c.Group == groupPattern {
-			pattern += c.Points
-		} else {
-			rest += c.Points
-		}
-	}
-
-	fs := []Flag{}
-	resolved := g.RecentMerged + g.RecentClosedUnmerged
-	if pattern <= notLandingFlagPoints && -pattern > rest &&
-		resolved >= notLandingMinResolved && 2*g.RecentMerged < resolved {
-		fs = append(fs, Flag{flagNotLanding, fmt.Sprintf(
-			"Recent PRs mostly not landing: %s of %s resolved merged in %d days",
-			thousands(g.RecentMerged), thousands(resolved), recentDays)})
-	}
-	if m.DriveBy() {
-		fs = append(fs, Flag{flagDriveBy, "Drive-by: PRs here, none merged, and no issues, comments, or reviews"})
-	}
-	if len(m.HeavyPRs) > 0 {
-		worst := slices.MaxFunc(m.HeavyPRs, func(a, b HeavyPR) int { return a.MaintainerCommits - b.MaintainerCommits })
-		fs = append(fs, Flag{flagHeavy, fmt.Sprintf(
-			"Heavy maintainer involvement on %s (#%d: %s, %s by others)",
-			plural(len(m.HeavyPRs), "merged PR"), worst.Number,
-			plural(worst.ReviewThreads, "review thread"), plural(worst.MaintainerCommits, "commit"))})
-	}
-	return fs
+	// Reason is the biggest factor in the score, in a few words.
+	Reason string `json:"reason"`
 }
 
 func points(n, weight float64) float64 {
@@ -191,85 +121,168 @@ func points(n, weight float64) float64 {
 
 const daysPerMonth = 365.25 / 12
 
+// A cost is the reason only when it takes at least reasonMinCost points and
+// at least reasonShare of what the user earned. Otherwise the score is
+// explained by what they've given: 101 PRs closed unmerged isn't the story
+// for someone with 1,686 merged.
+const (
+	reasonMinCost = -3
+	reasonShare   = 0.25
+)
+
 func score(m Metrics, w Weights) Result {
 	g := m.Global
 	months := float64(g.AccountAgeDays) / daysPerMonth
 
+	// Heavy PRs earn nothing. Here counts them at the usual credit and
+	// Burden takes the difference back, so the cost is visible.
+	gross := float64(m.PRsMerged) * m.AvgCredit()
+	net := m.CodeCredit()
 	here := []Component{
-		{Label: "Code credit", Detail: codeCreditDetail(m),
-			Count: m.CodeCredit(), Points: points(m.CodeCredit(), w.Code)},
-		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: points(float64(m.ThumbsUp), w.ThumbsUp)},
-		{Label: "PRs reviewed", Count: float64(m.Reviews), Points: points(float64(m.Reviews), w.Reviews)},
-		{Label: "Threads commented", Count: float64(m.Threads), Points: points(float64(m.Threads), w.Threads)},
-		{Label: "Issues opened", Count: float64(m.Issues), Points: points(float64(m.Issues), w.Issues)},
-		{Label: "PRs closed unmerged", Count: float64(m.PRsClosedUnmerged()),
-			Points: points(float64(m.PRsClosedUnmerged()), w.ClosedUnmerged)},
+		{Label: "Code credit", Detail: fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit()),
+			Count: gross, Points: points(gross, w.Code), why: plural(m.PRsMerged, "PR") + " merged here"},
+		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: points(float64(m.ThumbsUp), w.ThumbsUp),
+			why: plural(m.ThumbsUp, "upvote") + " here"},
+		{Label: "PRs reviewed", Count: float64(m.Reviews), Points: points(float64(m.Reviews), w.Reviews),
+			why: "reviewed " + plural(m.Reviews, "PR") + " here"},
+		{Label: "Threads commented", Count: float64(m.Threads), Points: points(float64(m.Threads), w.Threads),
+			why: "commented on " + plural(m.Threads, "thread") + " here"},
+		{Label: "Issues opened", Count: float64(m.Issues), Points: points(float64(m.Issues), w.Issues),
+			why: "opened " + plural(m.Issues, "issue") + " here"},
 	}
 
 	elsewhere := []Component{
-		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge)},
+		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge),
+			why: "account " + age(g.AccountAgeDays) + " old"},
 		{Label: "PRs merged elsewhere", Detail: acceptedDetail(g), Count: g.AcceptedMergedElsewhere(),
-			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere)},
+			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere), why: plural(g.MergedElsewhere, "PR") + " merged elsewhere"},
 		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),
-			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars)},
+			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars),
+			why: plural(g.ProjectStars, "star") + " on own projects"},
 		{Label: "Contributors to own projects", Count: float64(g.Contributors),
-			Points: points(float64(g.Contributors), w.Contributors)},
+			Points: points(float64(g.Contributors), w.Contributors), why: plural(g.Contributors, "contributor") + " to own projects"},
 	}
-	var elsewhereTotal float64
+	var positive float64
 	for _, c := range elsewhere {
-		elsewhereTotal += c.Points
+		positive += c.Points
 	}
-	if elsewhereTotal > w.ElsewhereCap {
+	if positive > w.ElsewhereCap {
 		elsewhere = append(elsewhere, Component{
 			Label:  "Cap",
-			Detail: fmt.Sprintf("elsewhere is at most %+.0f", w.ElsewhereCap),
-			Points: w.ElsewhereCap - elsewhereTotal,
+			Detail: fmt.Sprintf("benefit of the doubt is at most %+.0f", w.ElsewhereCap),
+			Points: w.ElsewhereCap - positive,
 		})
 	}
-
 	miss := 1 - g.LandingRate()
-	notLanding := Component{
-		Label: "Recent PRs not landing",
-		Detail: fmt.Sprintf("%s in %d days · %s of %s merged · history %s of %s",
-			thousands(g.RecentPRs), recentDays,
-			thousands(g.RecentMerged), thousands(g.RecentMerged+g.RecentClosedUnmerged),
-			thousands(g.HistoryMerged()), thousands(g.HistoryResolved())),
-		Count:  float64(g.RecentPRs),
-		Points: points(float64(g.RecentPRs), w.NotLanding) * miss * miss,
-	}
-
-	var r Result
-	var total float64
-	for _, grp := range []struct {
-		name  string
-		parts []Component
-	}{
-		{groupHere, here},
-		{groupElsewhere, elsewhere},
-		{groupPattern, []Component{notLanding, {
+	resolved := g.RecentMerged + g.RecentClosedUnmerged
+	gave := g.RecentElsewhereIssues + g.RecentElsewhereThreads + g.RecentElsewhereReviews
+	elsewhere = append(elsewhere,
+		Component{
+			Label: "Recent PRs not landing",
+			Detail: fmt.Sprintf("%s in %d days · %s of %s merged · history %s of %s",
+				thousands(g.RecentPRs), recentDays, thousands(g.RecentMerged), thousands(resolved),
+				thousands(g.HistoryMerged()), thousands(g.HistoryResolved())),
+			Count:  float64(g.RecentPRs),
+			Points: points(float64(g.RecentPRs), w.NotLanding) * miss * miss,
+			why:    fmt.Sprintf("%s of %s PRs resolved in %d days merged", thousands(g.RecentMerged), thousands(resolved), recentDays),
+		},
+		Component{
 			Label:  "PRs closed unmerged in repos",
 			Detail: fmt.Sprintf("days %d to %d · from %s", recentDays+1, sprayDays, plural(g.SpraySampled, "PR")),
 			Count:  float64(g.SprayRepos),
 			Points: sprayPoints(g.SprayRepos, w),
-		}}},
+			why:    fmt.Sprintf("PRs closed unmerged in %s elsewhere", plural(g.SprayRepos, "repo")),
+		},
+		Component{
+			Label: "Review not yet earned elsewhere",
+			Detail: fmt.Sprintf("%d days · %s open · %s merged · %s given",
+				recentDays, thousands(g.RecentElsewhereOpen), thousands(g.RecentElsewhereMerged), thousands(gave)),
+			Count:  float64(g.UnearnedElsewhere()),
+			Points: points(float64(g.UnearnedElsewhere()), w.Unearned),
+			why: fmt.Sprintf("%s open elsewhere in %d days, %s merged, %s", plural(g.RecentElsewhereOpen, "PR"),
+				recentDays, thousands(g.RecentElsewhereMerged), engagement(gave)),
+		},
+	)
+
+	asked := m.PRsOpen + m.PRsClosedUnmerged()
+	burden := []Component{
+		{Label: "PRs closed unmerged", Count: float64(m.PRsClosedUnmerged()),
+			Points: points(float64(m.PRsClosedUnmerged()), w.ClosedUnmerged),
+			why:    plural(m.PRsClosedUnmerged(), "PR") + " here closed unmerged"},
+		{Label: "Heavy maintainer involvement", Detail: heavyDetail(m),
+			Count: float64(len(m.HeavyPRs)), Points: points(net, w.Code) - points(gross, w.Code),
+			why: plural(len(m.HeavyPRs), "merged PR") + " here needed heavy maintainer work"},
+		{Label: "Review not yet earned", Detail: fmt.Sprintf("%s asked · %s merged · %s given",
+			thousands(asked), thousands(m.PRsMerged), thousands(m.Participation())),
+			Count: float64(m.Unearned()), Points: points(float64(m.Unearned()), w.Unearned),
+			why: fmt.Sprintf("%s here, %s merged, %s", plural(m.PRsOpened, "PR"), thousands(m.PRsMerged), engagement(m.Participation()))},
+	}
+
+	var r Result
+	for _, grp := range []struct {
+		name  string
+		parts []Component
+		total *int
+	}{
+		{groupHere, here, &r.Here},
+		{groupElsewhere, elsewhere, &r.Elsewhere},
+		{groupBurden, burden, &r.Burden},
 	} {
+		var sum float64
 		for _, c := range grp.parts {
 			c.Group = grp.name
-			total += c.Points
+			sum += c.Points
 			r.Components = append(r.Components, c)
 		}
+		*grp.total = int(math.Round(sum))
 	}
-	r.Score = int(math.Round(total))
-	r.Tier = tierFor(r.Score)
-	r.Flags = flags(m, r)
+	r.Score = r.Here + r.Elsewhere + r.Burden
+	r.Reason = reason(r.Components, float64(r.Here)+min(positive, w.ElsewhereCap))
 	return r
 }
 
-func codeCreditDetail(m Metrics) string {
+func heavyDetail(m Metrics) string {
 	if len(m.HeavyPRs) == 0 {
-		return fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit())
+		return ""
 	}
-	return fmt.Sprintf("%s merged, %d heavy, others × %.2f", thousands(m.PRsMerged), len(m.HeavyPRs), m.AvgCredit())
+	return plural(len(m.HeavyPRs), "merged PR") + " earn no credit"
+}
+
+// reason picks the biggest cost if it's large enough next to what the user
+// earned, and otherwise the biggest source of points. New components feed it
+// without making the summary longer.
+func reason(cs []Component, earned float64) string {
+	var cost, gain *Component
+	for i := range cs {
+		c := &cs[i]
+		if c.why == "" {
+			continue
+		}
+		if c.Points <= reasonMinCost && -c.Points >= reasonShare*earned && (cost == nil || c.Points < cost.Points) {
+			cost = c
+		}
+		if c.Points > 0 && (gain == nil || c.Points > gain.Points) {
+			gain = c
+		}
+	}
+	switch {
+	case cost != nil:
+		return cost.why
+	case gain != nil:
+		return gain.why
+	}
+	return "no activity here or elsewhere"
+}
+
+// engagement describes a count of issues, threads, and reviews.
+func engagement(n int) string {
+	if n == 0 {
+		return "no issues, comments, or reviews"
+	}
+	if n == 1 {
+		return "1 issue, comment, or review"
+	}
+	return fmt.Sprintf("%s issues, comments, and reviews", thousands(n))
 }
 
 func acceptedDetail(g Global) string {

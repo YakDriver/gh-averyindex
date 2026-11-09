@@ -80,6 +80,15 @@ type Global struct {
 	RecentTopCount int    `json:"recent_top_count,omitempty"`
 	RecentSampled  int    `json:"recent_sampled"`
 
+	// RecentElsewhere* cover the last recentDays days outside the scored
+	// repo: PRs the user opened that are still open or merged, and how much
+	// they engaged with other people's work there.
+	RecentElsewhereOpen    int `json:"recent_elsewhere_open"`
+	RecentElsewhereMerged  int `json:"recent_elsewhere_merged"`
+	RecentElsewhereIssues  int `json:"recent_elsewhere_issues"`
+	RecentElsewhereThreads int `json:"recent_elsewhere_threads"`
+	RecentElsewhereReviews int `json:"recent_elsewhere_reviews"`
+
 	// SprayRepos is how many repos, among the newest SpraySampled PRs opened
 	// 31 to 180 days ago, got a PR that was closed unmerged and none that
 	// merged. PRs still open don't count.
@@ -227,12 +236,31 @@ func (m Metrics) Participation() int {
 	return m.Issues + m.Threads + m.Reviews
 }
 
-// DriveBy reports whether the user has opened PRs here, none were merged, and
-// they've done nothing else here. Someone with merged PRs has already been
-// through review, so they aren't flagged.
-func (m Metrics) DriveBy() bool {
-	return m.PRsOpened > 0 && m.PRsMerged == 0 && m.Participation() == 0
+// Unearned is review the user has asked for here beyond what they've earned.
+// Open and closed PRs ask for review. Each merged PR earns review for
+// earnedPerMerge more, each issue, thread, or review earns one, and everyone
+// gets unearnedGrace for free, so a newcomer with a few PRs waiting isn't
+// charged.
+func (m Metrics) Unearned() int {
+	asked := m.PRsOpen + m.PRsClosedUnmerged()
+	return max(0, asked-earnedPerMerge*m.PRsMerged-m.Participation()-unearnedGrace)
 }
+
+// UnearnedElsewhere is the same over the last recentDays days outside this
+// repo. Only open PRs count as asking, because not-landing already weighs
+// the closed ones.
+func (g Global) UnearnedElsewhere() int {
+	gave := g.RecentElsewhereIssues + g.RecentElsewhereThreads + g.RecentElsewhereReviews
+	return max(0, g.RecentElsewhereOpen-earnedPerMerge*g.RecentElsewhereMerged-gave-unearnedGrace)
+}
+
+const (
+	// earnedPerMerge is how many PRs' worth of review a merged PR earns.
+	earnedPerMerge = 3
+	// unearnedGrace is how many PRs anyone can ask for without having
+	// earned it.
+	unearnedGrace = 3
+)
 
 // AvgCredit is the average credit across the recent merged PRs checked for
 // rework, leaving out heavy PRs, which earn nothing on their own. It's 1 if
@@ -505,6 +533,15 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.result(&recentFirst, recent, "desc", recentSample)
 	b.count(&g.RecentMerged, recent+" is:merged")
 	b.count(&g.RecentClosedUnmerged, recent+" is:closed is:unmerged")
+
+	// Elsewhere in the same window: what the user asked of other repos and
+	// what they gave them.
+	away := fmt.Sprintf("%s -repo:%s", globalScope(user), repo)
+	b.count(&g.RecentElsewhereOpen, fmt.Sprintf("is:pr author:%s %s created:>=%s is:open", user, away, since))
+	b.count(&g.RecentElsewhereMerged, fmt.Sprintf("is:pr author:%s %s created:>=%s is:merged", user, away, since))
+	b.count(&g.RecentElsewhereIssues, fmt.Sprintf("is:issue author:%s %s created:>=%s", user, away, since))
+	b.count(&g.RecentElsewhereThreads, fmt.Sprintf("commenter:%s -author:%s -reviewed-by:%s %s updated:>=%s", user, user, user, away, since))
+	b.count(&g.RecentElsewhereReviews, fmt.Sprintf("is:pr reviewed-by:%s -author:%s %s updated:>=%s", user, user, away, since))
 
 	// The searches with extras are sent separately, alongside the main
 	// batch. Together, GitHub can time out or exceed its resource limits on

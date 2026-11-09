@@ -1,6 +1,6 @@
 # Tuning the score (#13)
 
-The principles are in [philosophy.md](philosophy.md). For tuning, the key one is principle 4: rework and spraying must be plain to see in the report. That means a line or flag that states the facts, with a bounded score effect, not a cut big enough to drop a real contributor a tier.
+The principles are in [philosophy.md](philosophy.md). This doc records the v0.6 tuning. [scoring-v2.md](scoring-v2.md) replaced its flags and tiers with three scores and a reason line. The measurements here still hold.
 
 ## Data (2026-10-30)
 

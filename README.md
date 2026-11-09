@@ -3,45 +3,28 @@
 A [gh](https://cli.github.com/) extension that shows how helpful a user has been in a repository. It's meant for maintainers deciding whether to vouch for someone.
 
 ```console
-$ gh averyindex johnthedev97
-johnthedev97 in hashicorp/terraform-provider-aws  ·  Regular  ·  ➜ averyindex 68
-
-Participation
-  Issues opened      0
-  Threads commented  6
-  PRs reviewed       0
-  Upvotes received   49
-  ...
-
-Pull requests  3 merged · 1 open · 1 closed unmerged
-  #19195  merged 2022-03-15  +153 -103  rework 288%  credit 0.00
-  #9372   merged 2020-02-21  +1,975 -0  rework  12%  credit 0.88
-  #9261   merged 2019-07-10  +349 -0    rework   0%  credit 1.00  (commits by crjohn)
-  #50684  open since 2026-10-27
-
-Elsewhere on GitHub (public repos the user doesn't own)
-  ...
-
-Score
-  Here
-    Code credit (3 merged × 0.63)                 1.9    +18.3
-    Upvotes received                               49    +28.2
-    ...
-➜ averyindex                                  Regular       68
-
-averyindex v0.3.0 · 2026-10-29 17:54 UTC
+$ gh averyindex YakDriver
+YakDriver in hashicorp/terraform-provider-aws  ·  ➜ averyindex 246
+  Here +246  ·  Elsewhere +20  ·  Burden -20  ·  1,686 PRs merged here
 ```
 
-The score is for a quick read, not a verdict. Look at the breakdown.
+The score is the sum of three parts. **Here** is what the user has given this repo. **Elsewhere** is their record in other repos. **Burden** is review they've asked for here and haven't earned. The phrase at the end names the biggest factor. When a cost is big next to what the user has earned, it names the cost. Here's a user who opened 41 PRs in 36 days, with 1 small merge and no other engagement:
+
+```console
+someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -6
+  Here +20  ·  Elsewhere +1  ·  Burden -27  ·  41 PRs here, 1 merged, no issues, comments, or reviews
+```
+
+`--explain` prints everything behind the score: participation, recent merged PRs with rework, activity elsewhere, and every line of the breakdown.
 
 ## Why trust it
 
 AI tools made it cheap to produce plausible pull requests, comments, and issues. They didn't make it cheap to get a maintainer to merge your code unchanged, or to get other people to upvote your bug report or contribute to your project. averyindex weighs those signals most.
 
 - **It counts other people's judgments.** Merged PRs, rework, upvotes, and contributors to a user's projects all depend on someone else. Things a person produces alone (comments, issues) count for less, and PRs they merge into their own repositories don't count.
-- **It shows its work.** Every point in the score is on a line in the report, with the count behind it. If you disagree with the number, you can see exactly why it came out that way.
+- **It shows its work.** Every point in the score is on a line in `--explain`, with the count behind it. If you disagree with the number, you can see exactly why it came out that way.
 - **Anyone gets the same answer.** Activity outside the scored repo comes only from public repositories, and each version scores the same way for everyone. Every report records the version and time it was generated, so an old score can be checked.
-- **It reports. It doesn't decide.** The score is a quick read for a maintainer, not a gate. There's no threshold that admits or rejects anyone. [Flags](#flags) point out patterns worth a closer look and don't change the score.
+- **It reports. It doesn't decide.** The score is a quick read for a maintainer, not a gate. There's no threshold that admits or rejects anyone, and no tiers or labels to interpret.
 - **It says what it can't see.** See [Limits](#limits).
 
 ## Install
@@ -53,9 +36,9 @@ gh extension install YakDriver/gh-averyindex
 ## Usage
 
 ```sh
-gh averyindex [-R owner/repo] [--json] <user>
-gh averyindex [-R owner/repo] [--json] --pr <number>
-gh averyindex [--json] <pull request or issue URL>
+gh averyindex [-R owner/repo] [--explain | --json] <user>
+gh averyindex [-R owner/repo] [--explain | --json] --pr <number>
+gh averyindex [--explain | --json] <pull request or issue URL>
 gh averyindex --version
 ```
 
@@ -63,37 +46,25 @@ Pass a username, or score the author of a pull request or issue with `--pr` or b
 
 Otherwise, run it inside a clone to score against that repository, or pass `-R`. It uses your existing `gh` login, so it works on any repository you can read.
 
-`--json` output includes `schema_version`, `version`, and `generated_at` alongside the metrics, score, and flags. `schema_version` changes when a field is removed or changes meaning.
+`--json` output includes `schema_version`, `version`, and `generated_at` alongside the metrics, the score and its three parts, the reason, and every component. `schema_version` changes when a field is removed or changes meaning.
 
 ## What goes into it
 
-**Participation** in this repo: issues opened, other people's threads commented on (threads, not comments, so fifty "+1"s on one issue count once), PRs reviewed (not also counted as threads), and 👍 reactions other people gave the user's issues and PRs.
+**Here** is what the user has given this repo: PRs merged, weighed by **rework** (how much someone else changed before merging), 👍 reactions other people gave the user's issues and PRs, PRs reviewed, other people's threads commented on (threads, not comments, so fifty "+1"s count once), and issues opened.
 
-**Pull requests** in this repo, with **rework** for recent merged ones: how much of each PR someone else changed before it merged. A PR a maintainer mostly rewrote earns little credit. A CHANGELOG touch-up barely matters. A merged PR with a long review (20+ review threads) and 10 or more commits by others had **heavy maintainer involvement** and earns no credit. A long review the author worked through alone doesn't count.
+**Elsewhere** gives an established developer some benefit of the doubt in a repo they're new to: account age, PRs merged in other people's public repos (weighted by the share someone else merged or approved), and what other people do with the user's own projects (stars and outside contributors). That part is capped at 20, so it can't stand in for work here. Elsewhere also counts what the user's record elsewhere costs, with no cap:
 
-**Elsewhere on GitHub**: account age, PRs merged in other people's public repos, and what other people do with the user's own projects (stars and outside contributors). PRs a user merges into their own repos don't count, since nobody else judged them. Elsewhere, merged PRs count by the share someone else merged or approved, so merging your own PRs without review counts for less. Merges by bots such as Prow count, since they follow review. This gives an established developer some benefit of the doubt in a repo they're new to, and it's capped so it can't stand in for work here.
+- **Not landing:** the last 30 days of PRs weighed against the user's longer history, so a long record cushions a bad month.
+- **Spray:** repos where a PR from the 150 days before that was closed unmerged and none merged.
+- **Review not yet earned elsewhere:** PRs opened in other repos in the last 30 days and still open, beyond what the user's merges and engagement there earned.
 
-**Pattern**: penalties for opening PRs that don't land. One weighs the last 30 days against the user's longer history, so a long record cushions a bad month without hiding a burst of rejected PRs. The other covers the 150 days before that: it counts repos where a PR was closed unmerged and none merged. A few cost almost nothing, 20 cost about 7 points, and it tops out near 15. The two cover different PRs, so none counts twice. PRs still waiting for review don't count against anyone.
+**Burden** is review the user has asked for here and not earned:
 
-Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. The score maps to a tier: Novice, Contributor, Regular, Veteran, or Core. Exact weights are in the code.
+- **PRs closed unmerged** here.
+- **Heavy maintainer involvement:** a merged PR with 20 or more review threads and 10 or more commits by others earns no credit. A long review the author worked through alone doesn't count.
+- **Review not yet earned:** every open or closed PR here asks for review. Each merged PR earns review for 3 more, and each issue, comment, or review earns one. The first 3 are free. Beyond that, it costs. A slow review queue doesn't count against someone with a record here, but 37 PRs waiting from someone with 1 small merge and no other engagement does.
 
-## Flags
-
-Flags appear under the header line when something deserves a closer look. They state facts and don't change the score.
-
-| Flag | When |
-|---|---|
-| Recent PRs mostly not landing | The Pattern penalty outweighs everything else, and fewer than half of the user's recently resolved PRs merged |
-| Drive-by | PRs in this repo, none merged, and no issues, comments, or reviews here |
-| Heavy maintainer involvement | A merged PR here had a long review and many commits by others |
-
-```console
-hamid-digitalmarketer in YakDriver/oschmod  ·  Novice  ·  ➜ averyindex -17
-  ⚠ Recent PRs mostly not landing: 7 of 34 resolved merged in 30 days
-  ⚠ Drive-by: PRs here, none merged, and no issues, comments, or reviews
-```
-
-Flags are for yes-or-no facts. Spreading PRs across many repos is a matter of degree, so it's a line in the score instead of a flag. `--json` lists flags in a `flags` array with a stable `code` for each. Why the score works the way it does: [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/tuning.md](docs/design/tuning.md).
+Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. Exact weights are in the code. The reasoning is in [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/scoring-v2.md](docs/design/scoring-v2.md).
 
 ## Limits
 
