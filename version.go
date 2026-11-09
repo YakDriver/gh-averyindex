@@ -27,8 +27,10 @@ var version = ""
 //	   global leaves out the scored repo. Not-landing and spray moved to
 //	   Elsewhere. Burden is heavy maintainer involvement and authoring
 //	   without engagement, and PRs closed unmerged no longer cost on their
-//	   own. New: active_days, and recent_issues, recent_threads, and
-//	   recent_reviews in global.
+//	   own. merged_elsewhere is gone (use global.prs_merged). New:
+//	   active_days and recent_prs, and in global, recent_issues,
+//	   recent_threads, recent_reviews, engagement_truncated, and
+//	   engagement_unchecked.
 const schemaVersion = 4
 
 // buildInfo is the version and, when known, the commit and its date.

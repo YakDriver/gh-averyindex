@@ -11,8 +11,8 @@ YakDriver in hashicorp/terraform-provider-aws  ·  ➜ averyindex 266
 The score is the sum of three parts. **Here** is what the user has given this repo. **Elsewhere** is their record in other repos. **Burden** is what they cost maintainers here, mainly authoring many PRs without engaging. The phrase at the end names the biggest factor. When a cost is big next to what the user has earned, it names the cost. Here's a user who opened 41 PRs in 36 days, with 1 small merge and no other engagement:
 
 ```console
-someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -6
-  Here +20  ·  Elsewhere -1  ·  Burden -25  ·  41 PRs here, 1 merged, no issues, comments, or reviews
+someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -8
+  Here +20  ·  Elsewhere -3  ·  Burden -25  ·  41 PRs here, 1 merged, no issues, comments, or reviews
 ```
 
 `--explain` prints everything behind the score: participation, recent merged PRs with rework, activity elsewhere, and every line of the breakdown.
@@ -56,12 +56,12 @@ Otherwise, run it inside a clone to score against that repository, or pass `-R`.
 
 - **Not landing:** the last 30 days of PRs weighed against the user's longer history, so a long record cushions a bad month.
 - **Spray:** repos where a PR from the 150 days before that was closed unmerged and none merged.
-- **Authoring without engagement elsewhere:** the same measure as in Burden, over the last 30 days in other repos.
+- **Authoring without engagement elsewhere:** the same measure as in Burden, for PRs from the last 30 days in other repos that are still open. Not-landing covers the ones that resolved, so no PR is charged twice.
 
 **Burden** is what the user costs maintainers here:
 
 - **Heavy maintainer involvement:** a merged PR with 20 or more review threads and 10 or more commits by others earns no credit. A long review the author worked through alone doesn't count.
-- **Authoring without engagement:** the pattern of an AI PR factory, meaning many PRs, fast, with few merged and little else. For each PR, the user should have about one merged PR, or one issue, comment, or review of someone else's work. The cost grows with how far short they fall and how many PRs they opened, past the first 3. It's full at 10 PRs a month and smaller below that, so an occasional contributor who only authors pays little. Someone who reviews and discusses as much as they author pays nothing, however many PRs were closed.
+- **Authoring without engagement:** the pattern of an AI PR factory, meaning many PRs, fast, with few merged and little else. For each PR, the user should have about one merged PR. An issue, comment, or review of someone else's work counts a quarter as much, because anyone can produce it alone. The cost grows with how far short they fall and how many PRs they opened, past the first 3. It's full at 10 PRs a month, in the last 90 days or since their first issue or PR here, and smaller below that. An occasional contributor who only authors pays little. Closed PRs cost nothing on their own, so someone with many merges pays nothing however many were closed.
 
 Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. Exact weights are in the code. The reasoning is in [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/scoring-v2.md](docs/design/scoring-v2.md).
 
@@ -82,7 +82,7 @@ Signals that depend on someone else's judgment count more than things a person p
 
 ## Costs
 
-A user's searches go to GitHub as one GraphQL request. Two searches that need more detail per PR go out as separate requests at the same time, because combining them with the rest can exceed GitHub's limits for a prolific user. A few more requests cover reactions, rework, long reviews, and the user's own repos. A run usually takes 6 to 15 seconds, and longer for someone with thousands of issues and PRs in the repo. It costs a few GraphQL points out of 5,000 per hour. Searches all go through GraphQL rather than the REST search API and its limit of 30 requests per minute, so scoring several people in a row normally doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
+A user's searches go to GitHub as one GraphQL request. Two searches that need more detail per PR go out as separate requests at the same time, because combining them with the rest can exceed GitHub's limits for a prolific user. A few more requests cover reactions, rework, long reviews, the user's own repos, and their comments and reviews elsewhere in the last 30 days (up to 5 pages of 100 each, read alongside the searches). A run usually takes 6 to 15 seconds. Someone with thousands of issues and PRs in the repo can take 25 to 40 seconds. It costs a few GraphQL points out of 5,000 per hour. Searches all go through GraphQL rather than the REST search API and its limit of 30 requests per minute, so scoring several people in a row normally doesn't stall. In a terminal, a spinner shows while it works, and the score is bold. Neither appears when output is piped or redirected, though the `➜` pointing at the score always does. `NO_COLOR` turns off bold, and `TERM=dumb` switches the spinner to ASCII.
 
 If GitHub rate-limits the tool or returns a temporary server error (502, 503, or 504), it says on stderr how long it's waiting and retries.
 

@@ -58,6 +58,7 @@ type Weights struct {
 	Authoring         float64
 	AuthoringTarget   float64
 	AuthoringFullRate float64
+	EngagementCredit  float64
 }
 
 var defaultWeights = Weights{
@@ -80,6 +81,7 @@ var defaultWeights = Weights{
 	Authoring:         -5,
 	AuthoringTarget:   1,
 	AuthoringFullRate: 10,
+	EngagementCredit:  0.25,
 }
 
 // authoringGrace is how many PRs anyone can open before the balance between
@@ -90,23 +92,34 @@ const authoringGrace = 3
 // of an AI PR factory: many PRs, fast, with few merged and little else.
 //
 // It's a ratio. For each PR opened, the user should have about
-// AuthoringTarget merged PRs plus issues, comments, and reviews of other
-// people's work. The cost grows with how far short of that they fall
-// (squared, so falling a little short costs little) and with how many PRs
-// they opened past the grace. Someone who reviews and discusses as much as
-// they author pays nothing, however many PRs were closed.
+// AuthoringTarget merged PRs. An issue, comment, or review of someone else's
+// work counts EngagementCredit of a merge: it earns some review, but anyone
+// can produce it alone, and 40 "claiming this" comments are the cheapest
+// thing an agent can do (principle 3). The cost grows with how far short
+// the user falls (squared, so falling a little short costs little) and with
+// how many PRs they opened past the grace.
 //
-// It's also a rate. A factory opens dozens of PRs a month. Someone who opens
-// a PR every month or two and does nothing else is authoring only, but
-// that's an ordinary contributor. The cost is full at AuthoringFullRate PRs
-// a month, and scales down below that.
-func authoringPoints(prs, merged, gave int, months float64, w Weights) float64 {
+// It's also a rate. Someone who opens a PR every month or two and does
+// nothing else is authoring only, but that's an ordinary contributor. A
+// factory opens dozens a month. The cost is full at AuthoringFullRate PRs a
+// month, and scales down below that.
+func authoringPoints(prs, merged, gave int, perMonth float64, w Weights) float64 {
 	if prs <= authoringGrace {
 		return 0
 	}
-	short := max(0, 1-float64(merged+gave)/(w.AuthoringTarget*float64(prs)))
-	rate := float64(prs) / max(1, months)
-	return points(float64(prs-authoringGrace), w.Authoring) * short * short * min(1, rate/w.AuthoringFullRate)
+	earned := float64(merged) + w.EngagementCredit*float64(gave)
+	short := max(0, 1-earned/(w.AuthoringTarget*float64(prs)))
+	return points(float64(prs-authoringGrace), w.Authoring) * short * short * min(1, perMonth/w.AuthoringFullRate)
+}
+
+// hereRate is the user's PRs here per month: the higher of their rate since
+// their first issue or PR here and their rate in the last recentHereDays.
+// The recent rate keeps one old issue from shielding an account that comes
+// back and sprays.
+func hereRate(m Metrics) float64 {
+	lifetime := float64(m.PRsOpened) / max(1, float64(m.ActiveDays)/daysPerMonth)
+	recent := float64(m.RecentPRs) / (recentHereDays / daysPerMonth)
+	return max(lifetime, recent)
 }
 
 // sprayPoints is the spray penalty for n repos, shifted so 0 repos is 0.
@@ -183,7 +196,7 @@ func score(m Metrics, w Weights) Result {
 		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge),
 			why: "account " + age(g.AccountAgeDays) + " old"},
 		{Label: "PRs merged elsewhere", Detail: acceptedDetail(g), Count: g.AcceptedMergedElsewhere(),
-			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere), why: plural(g.MergedElsewhere, "PR") + " merged elsewhere"},
+			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere), why: mergedElsewhereWhy(g)},
 		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),
 			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars),
 			why: plural(g.ProjectStars, "star") + " on own projects"},
@@ -201,17 +214,29 @@ func score(m Metrics, w Weights) Result {
 			Points: w.ElsewhereCap - positive,
 		})
 	}
+	// Not landing and authoring without engagement split the recent PRs
+	// elsewhere so none is charged twice: not landing covers those that
+	// resolved, and authoring covers those still open, waiting for review.
 	miss := 1 - g.LandingRate()
-	resolved := g.RecentMerged + g.RecentClosedUnmerged
+	resolved := g.RecentResolved()
 	gave := g.RecentGave()
+	open := g.RecentOpen()
+	authoringElsewhere := authoringPoints(open, 0, gave, float64(open)/(recentDays/daysPerMonth), w)
+	gaveDetail := thousands(gave) + " given"
+	switch {
+	case g.EngagementUnchecked:
+		authoringElsewhere, gaveDetail = 0, "comments and reviews unchecked"
+	case g.EngagementTruncated:
+		gaveDetail = "at least " + gaveDetail
+	}
 	elsewhere = append(elsewhere,
 		Component{
 			Label: "Recent PRs not landing",
 			Detail: fmt.Sprintf("%s in %d days · %s of %s merged · history %s of %s",
 				thousands(g.RecentPRs), recentDays, thousands(g.RecentMerged), thousands(resolved),
 				thousands(g.HistoryMerged()), thousands(g.HistoryResolved())),
-			Count:  float64(g.RecentPRs),
-			Points: points(float64(g.RecentPRs), w.NotLanding) * miss * miss,
+			Count:  float64(resolved),
+			Points: points(float64(resolved), w.NotLanding) * miss * miss,
 			why:    fmt.Sprintf("%s of %s PRs elsewhere resolved in %d days merged", thousands(g.RecentMerged), thousands(resolved), recentDays),
 		},
 		Component{
@@ -222,13 +247,12 @@ func score(m Metrics, w Weights) Result {
 			why:    fmt.Sprintf("PRs closed unmerged in %s elsewhere", plural(g.SprayRepos, "repo")),
 		},
 		Component{
-			Label: "Authoring without engagement elsewhere",
-			Detail: fmt.Sprintf("%d days · %s · %s merged · %s given",
-				recentDays, plural(g.RecentPRs, "PR"), thousands(g.RecentMerged), thousands(gave)),
-			Count:  float64(g.RecentPRs),
-			Points: authoringPoints(g.RecentPRs, g.RecentMerged, gave, recentDays/daysPerMonth, w),
-			why: fmt.Sprintf("%s elsewhere in %d days, %s merged, %s", plural(g.RecentPRs, "PR"),
-				recentDays, thousands(g.RecentMerged), engagement(gave)),
+			Label:  "Authoring without engagement elsewhere",
+			Detail: fmt.Sprintf("%d days · %s open · %s", recentDays, thousands(open), gaveDetail),
+			Count:  float64(open),
+			Points: authoringElsewhere,
+			why: fmt.Sprintf("%s elsewhere in %d days still open, %s", plural(open, "PR"),
+				recentDays, engagement(gave)),
 		},
 	)
 
@@ -236,11 +260,11 @@ func score(m Metrics, w Weights) Result {
 		{Label: "Heavy maintainer involvement", Detail: heavyDetail(m),
 			Count: float64(len(m.HeavyPRs)), Points: points(net, w.Code) - points(gross, w.Code),
 			why: plural(len(m.HeavyPRs), "merged PR") + " here needed heavy maintainer work"},
-		{Label: "Authoring without engagement", Detail: fmt.Sprintf("%s in %s · %s merged · %s given",
-			plural(m.PRsOpened, "PR"), monthsSpan(m.ActiveDays), thousands(m.PRsMerged), thousands(m.Participation())),
+		{Label: "Authoring without engagement", Detail: fmt.Sprintf("%s · %.1f a month · %s merged · %s given",
+			plural(m.PRsOpened, "PR"), hereRate(m), thousands(m.PRsMerged), thousands(m.Participation())),
 			Count:  float64(m.PRsOpened),
-			Points: authoringPoints(m.PRsOpened, m.PRsMerged, m.Participation(), float64(m.ActiveDays)/daysPerMonth, w),
-			why:    fmt.Sprintf("%s here, %s merged, %s", plural(m.PRsOpened, "PR"), thousands(m.PRsMerged), engagement(m.Participation()))},
+			Points: authoringPoints(m.PRsOpened, m.PRsMerged, m.Participation(), hereRate(m), w),
+			why:    authoringWhy(m)},
 	}
 
 	var r Result
@@ -267,7 +291,13 @@ func score(m Metrics, w Weights) Result {
 	if positive > w.ElsewhereCap {
 		scale = w.ElsewhereCap / positive
 	}
-	r.Reason = reason(r.Components, float64(r.Here)+min(positive, w.ElsewhereCap), scale)
+	why, isCost := reason(r.Components, float64(r.Here)+min(positive, w.ElsewhereCap), scale)
+	// A drive-by, with PRs here and nothing earned here, is explained by
+	// that, not by an old account elsewhere.
+	if !isCost && r.Here == 0 && m.PRsOpened > 0 {
+		why = authoringWhy(m)
+	}
+	r.Reason = why
 	return r
 }
 
@@ -285,7 +315,7 @@ func heavyDetail(m Metrics) string {
 // elsewhereScale is what Elsewhere's gains are worth after its cap, so 5,000
 // PRs merged elsewhere don't outrank the 24 points earned here when they add
 // only 20 (Copilot on #30).
-func reason(cs []Component, earned, elsewhereScale float64) string {
+func reason(cs []Component, earned, elsewhereScale float64) (why string, isCost bool) {
 	var cost, gain *Component
 	var best float64
 	for i := range cs {
@@ -306,16 +336,31 @@ func reason(cs []Component, earned, elsewhereScale float64) string {
 	}
 	switch {
 	case cost != nil:
-		return cost.why
+		return cost.why, true
 	case gain != nil:
-		return gain.why
+		return gain.why, false
 	}
-	return "no activity here or elsewhere"
+	return "no activity here or elsewhere", false
 }
 
-// monthsSpan describes a span of days in months, at least 1.
-func monthsSpan(days int) string {
-	return plural(max(1, int(math.Round(float64(days)/daysPerMonth))), "month")
+// authoringWhy describes the user's PRs here and what else they gave.
+func authoringWhy(m Metrics) string {
+	merged := "none merged"
+	if m.PRsMerged > 0 {
+		merged = thousands(m.PRsMerged) + " merged"
+	}
+	return fmt.Sprintf("%s here, %s, %s", plural(m.PRsOpened, "PR"), merged, engagement(m.Participation()))
+}
+
+// mergedElsewhereWhy describes PRs merged elsewhere, with the share someone
+// else accepted when it's low, so a self-merge farm doesn't read as 1,645
+// PRs merged.
+func mergedElsewhereWhy(g Global) string {
+	why := plural(g.PRsMerged, "PR") + " merged elsewhere"
+	if g.AcceptedSampled > 0 && g.AcceptedShare() < 0.9 {
+		why += fmt.Sprintf(", %.0f%% accepted by others", g.AcceptedShare()*100)
+	}
+	return why
 }
 
 // engagement describes a count of issues, threads, and reviews.
@@ -333,7 +378,7 @@ func acceptedDetail(g Global) string {
 	if g.AcceptedSampled == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s merged · %.0f%% accepted by others", thousands(g.MergedElsewhere), g.AcceptedShare()*100)
+	return fmt.Sprintf("%s merged · %.0f%% accepted by others", thousands(g.PRsMerged), g.AcceptedShare()*100)
 }
 
 // age describes an account age in days, months, or years.

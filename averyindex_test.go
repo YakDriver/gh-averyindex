@@ -47,6 +47,7 @@ type fakeSource struct {
 	details                   []string // queries of searches with extras
 	comments, reviews         []engaged
 	engagedSince              time.Time
+	engageErr                 error
 }
 
 func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
@@ -86,9 +87,12 @@ func (f *fakeSource) MergedPRs(repo, q string, n int) (int, []rawPR, error) {
 	return f.merged, f.prs[:min(n, len(f.prs))], nil
 }
 
-func (f *fakeSource) Engagement(login string, since time.Time) ([]engaged, []engaged, error) {
+func (f *fakeSource) Engagement(login string, since time.Time) (activity, error) {
 	f.engagedSince = since
-	return f.comments, f.reviews, f.err
+	if f.engageErr != nil {
+		return activity{}, f.engageErr
+	}
+	return activity{Comments: f.comments, Reviews: f.reviews}, nil
 }
 
 func (f *fakeSource) ReviewedPRs(repo, q string, minThreads int) ([]rawPR, error) {
@@ -175,7 +179,7 @@ func TestCollect(t *testing.T) {
 	if got := m.CodeCredit(); got != 4.5 {
 		t.Errorf("CodeCredit() = %v, want 4.5 (6 merged × 0.75)", got)
 	}
-	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30, MergedElsewhere: 40,
+	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30,
 		RecentMerged: 2, RecentClosedUnmerged: 1,
 		RecentPRs: 4, RecentRepos: 3, RecentTopRepo: "b/y", RecentTopCount: 2, RecentSampled: 4}
 	if m.Global != wantGlobal {
@@ -486,9 +490,9 @@ func TestScore(t *testing.T) {
 		{"a few open PRs are neutral", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
 		// 2 beyond the grace of 3, with nothing earned.
 		{"5 open in a month, nothing else", Metrics{PRsOpened: 5, PRsOpen: 5}, -4},
-		// 12 PRs against 2 merged and 3 threads: short of balance, so a
-		// small cost.
-		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 17},
+		// 12 PRs in a month against 2 merged and 3 threads: well short of
+		// balance.
+		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 13},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -537,7 +541,7 @@ func elsewherePoints(r Result) float64 {
 }
 
 func TestScoreElsewhereCapped(t *testing.T) {
-	famous := Metrics{Global: Global{AccountAgeDays: 5000, PRsOpened: 6000, PRsMerged: 5000, MergedElsewhere: 5000}}
+	famous := Metrics{Global: Global{AccountAgeDays: 5000, PRsOpened: 6000, PRsMerged: 5000}}
 	r := score(famous, defaultWeights)
 	if got := elsewherePoints(r); math.Abs(got-defaultWeights.ElsewhereCap) > 1e-9 {
 		t.Errorf("elsewhere = %v, want cap %v", got, defaultWeights.ElsewhereCap)
@@ -582,8 +586,10 @@ func TestScoreNotLanding(t *testing.T) {
 	if dormant != 0 {
 		t.Errorf("dormant penalty = %.1f, want 0", dormant)
 	}
-	if spray > -25 {
-		t.Errorf("spray penalty = %.1f, want below -25", spray)
+	// Only the 26 resolved PRs count here. The 82 still open are charged
+	// under authoring without engagement elsewhere.
+	if spray > -20 {
+		t.Errorf("spray penalty = %.1f, want below -20", spray)
 	}
 	if prolific < -1 {
 		t.Errorf("prolific penalty = %.1f, want above -1", prolific)
@@ -596,9 +602,9 @@ func TestScoreNotLanding(t *testing.T) {
 func TestScoreSprayAccountScoresBadly(t *testing.T) {
 	// The pattern from a 17-day-old account that opened 106 PRs across 22 repos.
 	spray := Metrics{PRsOpened: 2, Global: Global{AccountAgeDays: 17, PRsOpened: 108, PRsMerged: 3, PRsOpen: 82,
-		RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23, MergedElsewhere: 3}}
+		RecentPRs: 108, RecentMerged: 3, RecentClosedUnmerged: 23}}
 	// A real newcomer: established account, one closed PR here.
-	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, MergedElsewhere: 25, RecentPRs: 2}}
+	newcomer := Metrics{PRsOpened: 1, Global: Global{AccountAgeDays: 1500, PRsOpened: 30, PRsMerged: 25, RecentPRs: 2}}
 
 	s, n := score(spray, defaultWeights).Score, score(newcomer, defaultWeights).Score
 	if s > -20 {
@@ -612,7 +618,7 @@ func TestScoreSprayAccountScoresBadly(t *testing.T) {
 func TestScoreDormantVeteranStaysStrong(t *testing.T) {
 	// Years of merged work here and elsewhere, nothing in the last month.
 	dormant := Metrics{PRsOpened: 40, PRsMerged: 35, Threads: 60, Issues: 10, ThumbsUp: 30,
-		Global: Global{AccountAgeDays: 3000, PRsOpened: 300, PRsMerged: 280, MergedElsewhere: 245}}
+		Global: Global{AccountAgeDays: 3000, PRsOpened: 300, PRsMerged: 280}}
 	if r := score(dormant, defaultWeights); r.Score < 80 {
 		t.Errorf("dormant veteran scored %d (%s), want 80+", r.Score, r.Reason)
 	}
@@ -1103,7 +1109,7 @@ func TestRenderText(t *testing.T) {
 		},
 		OpenPRs: []searchItem{{Number: 71, CreatedAt: day("2026-10-20"), IsPR: true}},
 		Global: Global{AccountCreated: day("2024-10-29"), AccountAgeDays: 730,
-			PRsOpened: 1300, PRsMerged: 1250, PRsOpen: 12, MergedElsewhere: 50,
+			PRsOpened: 1300, PRsMerged: 1250, PRsOpen: 12,
 			RecentPRs: 150, RecentRepos: 2, RecentTopRepo: "o/r", RecentTopCount: 70, RecentSampled: 100},
 	}
 	var buf bytes.Buffer
@@ -1134,7 +1140,7 @@ func TestRenderText(t *testing.T) {
 		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
 		`Last 30 days +150 PRs · 0 merged · 0 closed unmerged · 150 open`,
 		`\n +across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
-		`Cap \(benefit of the doubt is at most \+20\) +-9\.7`,
+		`Cap \(benefit of the doubt is at most \+20\) +-28\.1`,
 		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {
 		if !regexp.MustCompile(want).MatchString(out) {
@@ -1260,7 +1266,7 @@ func TestAcceptedByOthers(t *testing.T) {
 }
 
 func TestScoreElsewhereWeightedByAcceptance(t *testing.T) {
-	base := Global{AccountAgeDays: 30, MergedElsewhere: 100}
+	base := Global{AccountAgeDays: 30, PRsMerged: 100}
 	merged := func(g Global) Component {
 		r := score(Metrics{Global: g}, defaultWeights)
 		return r.Components[slices.IndexFunc(r.Components, func(c Component) bool { return c.Label == "PRs merged elsewhere" })]
@@ -1383,13 +1389,13 @@ func TestRenderHeavyPRsOnce(t *testing.T) {
 func TestAuthoringPointsRate(t *testing.T) {
 	// Authoring only, 6 PRs and 1 merge. In a month that's a burst. Over two
 	// years it's an ordinary occasional contributor.
-	burst := authoringPoints(6, 1, 0, 1, defaultWeights)
-	slow := authoringPoints(6, 1, 0, 24, defaultWeights)
+	burst := authoringPoints(6, 1, 0, 6, defaultWeights)
+	slow := authoringPoints(6, 1, 0, 6.0/24, defaultWeights)
 	if burst > -3 || slow < -0.2 {
 		t.Errorf("burst %.1f, slow %.1f", burst, slow)
 	}
 	// A1: 41 PRs in about a month costs the full amount.
-	if full, a1 := authoringPoints(41, 1, 0, 0.1, defaultWeights), authoringPoints(41, 1, 0, 1.1, defaultWeights); full != a1 {
+	if full, a1 := authoringPoints(41, 1, 0, 410, defaultWeights), authoringPoints(41, 1, 0, 41/1.1, defaultWeights); full != a1 {
 		t.Errorf("A1 at 37 a month should pay in full: %.1f vs %.1f", a1, full)
 	}
 }
@@ -1409,10 +1415,13 @@ func TestAuthoringPoints(t *testing.T) {
 		// issues, comments, and reviews.
 		{"authors and reviews", 1797, 1686, 2040, 0, 0},
 		{"merges alone balance", 30, 30, 0, 0, 0},
-		{"reviews alone balance", 20, 0, 20, 0, 0},
-		{"about half balanced costs about a quarter", 19, 5, 5, -4.8, -4.4},
+		// An issue, comment, or review counts a quarter of a merge.
+		{"engagement alone balances at 4 per PR", 20, 0, 80, 0, 0},
+		// Reviewer on #30: 40 "claiming this" comments are cheap.
+		{"A1 with 40 comments", 41, 1, 40, -14.5, -13.5},
+		{"about half short", 19, 5, 20, -4.8, -4.4},
 	} {
-		if got := authoringPoints(tt.prs, tt.merged, tt.gave, 1, w); got < tt.lo || got > tt.hi {
+		if got := authoringPoints(tt.prs, tt.merged, tt.gave, float64(tt.prs), w); got < tt.lo || got > tt.hi {
 			t.Errorf("%s: authoringPoints(%d, %d, %d) = %.1f, want %.1f to %.1f", tt.name, tt.prs, tt.merged, tt.gave, got, tt.lo, tt.hi)
 		}
 	}
@@ -1432,14 +1441,22 @@ func TestCollectElsewhereEngagement(t *testing.T) {
 			{Repo: "c/d", Owner: "c", Number: 6, Author: "x", At: at, Private: true},
 			{Repo: "e/f", Owner: "e", Number: 7, At: at}, // author's account deleted
 		},
-		reviews: []engaged{{Repo: "a/b", Owner: "a", Number: 9, Author: "x", At: at}, {Repo: "o/r", Owner: "o", Number: 10, At: at}},
+		reviews: []engaged{
+			{Repo: "a/b", Owner: "a", Number: 9, Author: "x", At: at},
+			{Repo: "o/r", Owner: "o", Number: 10, At: at},
+			// Copilot on #30: commented on and reviewed counts once, as a
+			// review.
+			{Repo: "a/b", Owner: "a", Number: 1, Author: "x", At: at},
+			// Review on their own PR.
+			{Repo: "g/h", Owner: "g", Number: 11, Author: "u", At: at},
+		},
 	}
 	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Global.RecentThreads != 2 || m.Global.RecentReviews != 1 {
-		t.Errorf("threads %d, reviews %d, want 2 and 1", m.Global.RecentThreads, m.Global.RecentReviews)
+	if m.Global.RecentThreads != 1 || m.Global.RecentReviews != 2 {
+		t.Errorf("threads %d, reviews %d, want 1 and 2", m.Global.RecentThreads, m.Global.RecentReviews)
 	}
 	if !src.engagedSince.Equal(testNow.AddDate(0, 0, -recentDays)) {
 		t.Errorf("engagement since %v", src.engagedSince)
@@ -1455,6 +1472,78 @@ func TestCollectElsewhereEngagement(t *testing.T) {
 	}
 }
 
+func TestCollectEngagementFailureKeepsReport(t *testing.T) {
+	src := &fakeSource{engageErr: errors.New("timeout")}
+	var buf bytes.Buffer
+	old := notices
+	notices = &buf
+	t.Cleanup(func() { notices = old })
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Global.EngagementUnchecked || !strings.Contains(buf.String(), "comments and reviews elsewhere") {
+		t.Errorf("unchecked %v, notice %q", m.Global.EngagementUnchecked, buf.String())
+	}
+	// Missing engagement isn't charged as none.
+	m.Global.RecentPRs = 40
+	for _, c := range score(m, defaultWeights).Components {
+		if c.Label == "Authoring without engagement elsewhere" && c.Points != 0 {
+			t.Errorf("unchecked engagement cost %.1f", c.Points)
+		}
+	}
+}
+
+// Carried over from TestFlags, which guarded these cases before flags were
+// removed.
+func TestScoreCarriedFromFlags(t *testing.T) {
+	// An established account with one closed PR here and two comments: no
+	// cost, and the reason isn't a cost.
+	honest := score(Metrics{PRsOpened: 1, Threads: 2,
+		Global: Global{AccountAgeDays: 1500, PRsOpened: 1, RecentPRs: 1, RecentClosedUnmerged: 1}}, defaultWeights)
+	if honest.Burden != 0 || honest.Elsewhere < 0 || honest.Score <= 0 || honest.Reason != "account 4.1 years old" {
+		t.Errorf("honest newcomer: %+v", honest)
+	}
+	// A slow review queue here: 10 PRs over a year, 3 merged, 5 comments.
+	// Not a factory, so Burden is about 0.
+	slow := score(Metrics{PRsOpened: 10, PRsMerged: 3, PRsOpen: 7, Threads: 5, ActiveDays: 400, RecentPRs: 3,
+		Global: Global{AccountAgeDays: 1487}}, defaultWeights)
+	if slow.Burden < -1 {
+		t.Errorf("slow review queue: Burden %d", slow.Burden)
+	}
+}
+
+func TestAuthoringRateUsesRecentPRs(t *testing.T) {
+	// Reviewer on #30: one issue three years ago doesn't shield 40 PRs in
+	// the last 90 days.
+	burst := Metrics{PRsOpened: 41, PRsMerged: 1, ActiveDays: 30, RecentPRs: 41}
+	shielded := burst
+	shielded.ActiveDays = 1095
+	if a, b := score(burst, defaultWeights).Burden, score(shielded, defaultWeights).Burden; a != b || a > -20 {
+		t.Errorf("Burden %d in a month, %d after an old issue", a, b)
+	}
+}
+
+func TestNotLandingAndAuthoringSplitPRs(t *testing.T) {
+	// Reviewer on #30: the same recent PRs aren't charged twice. Not
+	// landing counts the resolved ones, and authoring the open ones.
+	g := Global{AccountAgeDays: 1000, PRsOpened: 155, PRsMerged: 32, PRsOpen: 76,
+		RecentPRs: 155, RecentMerged: 32, RecentClosedUnmerged: 47}
+	r := score(Metrics{Global: g}, defaultWeights)
+	for _, c := range r.Components {
+		switch c.Label {
+		case "Recent PRs not landing":
+			if c.Count != 79 {
+				t.Errorf("not landing counts %v PRs, want the 79 resolved", c.Count)
+			}
+		case "Authoring without engagement elsewhere":
+			if c.Count != 76 {
+				t.Errorf("authoring counts %v PRs, want the 76 open", c.Count)
+			}
+		}
+	}
+}
+
 func TestReason(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -1463,6 +1552,13 @@ func TestReason(t *testing.T) {
 	}{
 		{"nothing", Metrics{}, "no activity here or elsewhere"},
 		{"merged work", Metrics{PRsOpened: 3, PRsMerged: 3}, "3 PRs merged here"},
+		// Reviewer on #30: a drive-by is explained by the PRs, not the
+		// account's age.
+		{"drive-by", Metrics{PRsOpened: 3, Global: Global{AccountAgeDays: 1790}},
+			"3 PRs here, none merged, no issues, comments, or reviews"},
+		// Reviewer on #30: a self-merge farm shows the share others accepted.
+		{"self-merged elsewhere", Metrics{Global: Global{AccountAgeDays: 30, PRsMerged: 1645, AcceptedSampled: 100, AcceptedElsewhere: 21}},
+			"1,645 PRs merged elsewhere, 21% accepted by others"},
 		{"asking far beyond earned", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2},
 			"41 PRs here, 1 merged, no issues, comments, or reviews"},
 		// A cost that's small next to what was earned isn't the story.
@@ -1494,7 +1590,7 @@ func TestRenderSummaryIsTwoLines(t *testing.T) {
 
 func TestScorePartsAddUp(t *testing.T) {
 	m := Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2,
-		Global: Global{AccountAgeDays: 1500, MergedElsewhere: 37, RecentPRs: 69, RecentMerged: 1, RecentClosedUnmerged: 4}}
+		Global: Global{AccountAgeDays: 1500, PRsMerged: 37, RecentPRs: 69, RecentMerged: 1, RecentClosedUnmerged: 4}}
 	r := score(m, defaultWeights)
 	if r.Score != r.Here+r.Elsewhere+r.Burden {
 		t.Errorf("score %d != here %d + elsewhere %d + burden %d", r.Score, r.Here, r.Elsewhere, r.Burden)
@@ -1507,7 +1603,7 @@ func TestScorePartsAddUp(t *testing.T) {
 func TestReasonUsesCappedElsewhere(t *testing.T) {
 	// Copilot on #30: 5,000 PRs merged elsewhere add 20 after the cap, less
 	// than 3 merged here.
-	m := Metrics{PRsOpened: 3, PRsMerged: 3, Global: Global{AccountAgeDays: 3000, MergedElsewhere: 5000}}
+	m := Metrics{PRsOpened: 3, PRsMerged: 3, Global: Global{AccountAgeDays: 3000}}
 	if got := score(m, defaultWeights).Reason; got != "3 PRs merged here" {
 		t.Errorf("reason = %q", got)
 	}
