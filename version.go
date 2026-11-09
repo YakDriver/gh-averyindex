@@ -24,10 +24,11 @@ var version = ""
 //	   comes from the newest 100 recent PRs, without paging for more.
 //	4: three scores (here, elsewhere, burden) that sum to averyindex, and
 //	   a reason. tier and flags are gone. Components use count and points.
-//	   PRs closed unmerged moved from Here to Burden, and not-landing and
-//	   spray moved from Pattern to Elsewhere. New: recent_elsewhere_open,
-//	   recent_elsewhere_merged, recent_elsewhere_issues,
-//	   recent_elsewhere_threads, and recent_elsewhere_reviews in global.
+//	   global leaves out the scored repo. Not-landing and spray moved to
+//	   Elsewhere. Burden is heavy maintainer involvement and authoring
+//	   without engagement, and PRs closed unmerged no longer cost on their
+//	   own. New: active_days, and recent_issues, recent_threads, and
+//	   recent_reviews in global.
 const schemaVersion = 4
 
 // buildInfo is the version and, when known, the commit and its date.

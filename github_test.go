@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -299,6 +300,32 @@ func TestReviewedPRsNoneLong(t *testing.T) {
 	prs, err := gh.ReviewedPRs("o/r", "q", 20)
 	if err != nil || len(prs) != 0 || calls != 1 {
 		t.Errorf("prs %+v, err %v, calls %d", prs, err, calls)
+	}
+}
+
+func TestEngagement(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		if vars["login"] != "u" || vars["from"] != "2026-09-29T12:00:00Z" {
+			t.Errorf("vars = %v", vars)
+		}
+		if !strings.Contains(query, "issueComments(last: 100)") || !strings.Contains(query, "contributionsCollection(from: $from)") {
+			t.Errorf("query:\n%s", query)
+		}
+		return `{"data":{"user":{
+			"issueComments":{"nodes":[{"createdAt":"2026-10-20T00:00:00Z",
+				"repository":{"nameWithOwner":"a/b","isPrivate":false,"owner":{"login":"a"}},"issue":{"number":3,"author":{"login":"x"}}}]},
+			"contributionsCollection":{"pullRequestReviewContributions":{"nodes":[{"occurredAt":"2026-10-21T00:00:00Z",
+				"repository":{"nameWithOwner":"c/d","isPrivate":true,"owner":{"login":"c"}},"pullRequest":{"number":4,"author":null}}]}}}}}`
+	}).client(t)
+	comments, reviews, err := gh.Engagement("u", time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0] != (engaged{Repo: "a/b", Owner: "a", Number: 3, Author: "x", At: day("2026-10-20")}) {
+		t.Errorf("comments = %+v", comments)
+	}
+	if len(reviews) != 1 || !reviews[0].Private || reviews[0].Author != "" || reviews[0].Number != 4 {
+		t.Errorf("reviews = %+v", reviews)
 	}
 }
 

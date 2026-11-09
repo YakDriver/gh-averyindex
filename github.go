@@ -70,6 +70,10 @@ type source interface {
 	// matching query and returns those with at least minThreads review
 	// threads, with commits.
 	ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error)
+	// Engagement returns the user's newest issue and PR comments (at most
+	// engagementSample) and the PRs they reviewed since since, with where
+	// and when each happened.
+	Engagement(login string, since time.Time) (comments, reviews []engaged, err error)
 	// OwnedRepoStars returns the star counts of the user's public, non-fork
 	// repositories, at most the 100 most starred.
 	OwnedRepoStars(login string) ([]int, error)
@@ -619,6 +623,94 @@ func (g *gitHub) ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error
 		prs[i].ReviewThreads = threads[prs[i].Number]
 	}
 	return prs, err
+}
+
+// engaged is one comment or review by the user on someone's issue or PR.
+type engaged struct {
+	Repo    string // owner/name
+	Owner   string
+	Private bool
+	Number  int
+	Author  string // the issue or PR's author
+	At      time.Time
+}
+
+// engagementSample is how many of the user's newest comments are read. More
+// than that in 30 days is plenty of engagement, so a lower bound is enough.
+const engagementSample = 100
+
+const engagementQuery = `
+query($login: String!, $from: DateTime!) {
+  user(login: $login) {
+    issueComments(last: 100) {
+      nodes { createdAt repository { nameWithOwner isPrivate owner { login } } issue { number author { login } } }
+    }
+    contributionsCollection(from: $from) {
+      pullRequestReviewContributions(first: 100) {
+        nodes { occurredAt repository { nameWithOwner isPrivate owner { login } } pullRequest { number author { login } } }
+      }
+    }
+  }
+}`
+
+type engagedRepo struct {
+	NameWithOwner string
+	IsPrivate     bool
+	Owner         struct{ Login string }
+}
+
+type engagedItem struct {
+	Number int
+	Author *struct{ Login string }
+}
+
+func (r engagedRepo) engaged(it engagedItem, at time.Time) engaged {
+	e := engaged{Repo: r.NameWithOwner, Owner: r.Owner.Login, Private: r.IsPrivate, Number: it.Number, At: at}
+	if it.Author != nil {
+		e.Author = it.Author.Login
+	}
+	return e
+}
+
+// Engagement uses timestamps on the comments and reviews themselves.
+// Searching for threads updated recently would credit old comments on
+// threads someone else touched since (Copilot on #30).
+func (g *gitHub) Engagement(login string, since time.Time) ([]engaged, []engaged, error) {
+	var resp struct {
+		User *struct {
+			IssueComments struct {
+				Nodes []struct {
+					CreatedAt  time.Time
+					Repository engagedRepo
+					Issue      engagedItem
+				}
+			}
+			ContributionsCollection struct {
+				PullRequestReviewContributions struct {
+					Nodes []struct {
+						OccurredAt  time.Time
+						Repository  engagedRepo
+						PullRequest engagedItem
+					}
+				}
+			}
+		}
+	}
+	vars := map[string]any{"login": login, "from": since.UTC().Format(time.RFC3339)}
+	if err := g.gqlDo(engagementQuery, vars, &resp); err != nil {
+		return nil, nil, fmt.Errorf("comments and reviews by %s: %w", login, err)
+	}
+	if resp.User == nil {
+		return nil, nil, nil
+	}
+	var comments, reviews []engaged
+	for _, n := range resp.User.IssueComments.Nodes {
+		comments = append(comments, n.Repository.engaged(n.Issue, n.CreatedAt))
+	}
+	for _, n := range resp.User.ContributionsCollection.PullRequestReviewContributions.Nodes {
+		reviews = append(reviews, n.Repository.engaged(n.PullRequest, n.OccurredAt))
+	}
+	return comments, reviews, nil
 }
 
 const ownedReposQuery = `

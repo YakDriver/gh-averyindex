@@ -12,9 +12,9 @@ import (
 //   - Elsewhere: the user's record outside this repository. Its positive
 //     part is capped, so it gives an established developer some benefit of
 //     the doubt without standing in for work here. Its negative part, for
-//     PRs that don't land or ask for review that wasn't earned, isn't.
-//   - Burden: review the user has asked for here and not earned. It's never
-//     positive.
+//     PRs that don't land and authoring without engagement, isn't.
+//   - Burden: what the user costs maintainers here: heavy maintainer
+//     involvement, and authoring without engagement. It's never positive.
 const (
 	groupHere      = "Here"
 	groupElsewhere = "Elsewhere"
@@ -54,10 +54,10 @@ type Weights struct {
 	SprayMid   float64
 	SpraySteep float64
 
-	// Burden, and the matching line in Elsewhere. Unearned is per doubling
-	// of PRs that asked for review beyond what the user earned.
-	ClosedUnmerged float64
-	Unearned       float64
+	// Burden, and the matching line in Elsewhere. See authoringPoints.
+	Authoring         float64
+	AuthoringTarget   float64
+	AuthoringFullRate float64
 }
 
 var defaultWeights = Weights{
@@ -77,8 +77,36 @@ var defaultWeights = Weights{
 	SprayMid:        20,
 	SpraySteep:      4,
 
-	ClosedUnmerged: -3,
-	Unearned:       -4,
+	Authoring:         -5,
+	AuthoringTarget:   1,
+	AuthoringFullRate: 10,
+}
+
+// authoringGrace is how many PRs anyone can open before the balance between
+// authoring and everything else counts.
+const authoringGrace = 3
+
+// authoringPoints is the cost of authoring without engagement, the pattern
+// of an AI PR factory: many PRs, fast, with few merged and little else.
+//
+// It's a ratio. For each PR opened, the user should have about
+// AuthoringTarget merged PRs plus issues, comments, and reviews of other
+// people's work. The cost grows with how far short of that they fall
+// (squared, so falling a little short costs little) and with how many PRs
+// they opened past the grace. Someone who reviews and discusses as much as
+// they author pays nothing, however many PRs were closed.
+//
+// It's also a rate. A factory opens dozens of PRs a month. Someone who opens
+// a PR every month or two and does nothing else is authoring only, but
+// that's an ordinary contributor. The cost is full at AuthoringFullRate PRs
+// a month, and scales down below that.
+func authoringPoints(prs, merged, gave int, months float64, w Weights) float64 {
+	if prs <= authoringGrace {
+		return 0
+	}
+	short := max(0, 1-float64(merged+gave)/(w.AuthoringTarget*float64(prs)))
+	rate := float64(prs) / max(1, months)
+	return points(float64(prs-authoringGrace), w.Authoring) * short * short * min(1, rate/w.AuthoringFullRate)
 }
 
 // sprayPoints is the spray penalty for n repos, shifted so 0 repos is 0.
@@ -175,7 +203,7 @@ func score(m Metrics, w Weights) Result {
 	}
 	miss := 1 - g.LandingRate()
 	resolved := g.RecentMerged + g.RecentClosedUnmerged
-	gave := g.RecentElsewhereIssues + g.RecentElsewhereThreads + g.RecentElsewhereReviews
+	gave := g.RecentGave()
 	elsewhere = append(elsewhere,
 		Component{
 			Label: "Recent PRs not landing",
@@ -184,7 +212,7 @@ func score(m Metrics, w Weights) Result {
 				thousands(g.HistoryMerged()), thousands(g.HistoryResolved())),
 			Count:  float64(g.RecentPRs),
 			Points: points(float64(g.RecentPRs), w.NotLanding) * miss * miss,
-			why:    fmt.Sprintf("%s of %s PRs resolved in %d days merged", thousands(g.RecentMerged), thousands(resolved), recentDays),
+			why:    fmt.Sprintf("%s of %s PRs elsewhere resolved in %d days merged", thousands(g.RecentMerged), thousands(resolved), recentDays),
 		},
 		Component{
 			Label:  "PRs closed unmerged in repos",
@@ -194,28 +222,25 @@ func score(m Metrics, w Weights) Result {
 			why:    fmt.Sprintf("PRs closed unmerged in %s elsewhere", plural(g.SprayRepos, "repo")),
 		},
 		Component{
-			Label: "Review not yet earned elsewhere",
-			Detail: fmt.Sprintf("%d days · %s open · %s merged · %s given",
-				recentDays, thousands(g.RecentElsewhereOpen), thousands(g.RecentElsewhereMerged), thousands(gave)),
-			Count:  float64(g.UnearnedElsewhere()),
-			Points: points(float64(g.UnearnedElsewhere()), w.Unearned),
-			why: fmt.Sprintf("%s open elsewhere in %d days, %s merged, %s", plural(g.RecentElsewhereOpen, "PR"),
-				recentDays, thousands(g.RecentElsewhereMerged), engagement(gave)),
+			Label: "Authoring without engagement elsewhere",
+			Detail: fmt.Sprintf("%d days · %s · %s merged · %s given",
+				recentDays, plural(g.RecentPRs, "PR"), thousands(g.RecentMerged), thousands(gave)),
+			Count:  float64(g.RecentPRs),
+			Points: authoringPoints(g.RecentPRs, g.RecentMerged, gave, recentDays/daysPerMonth, w),
+			why: fmt.Sprintf("%s elsewhere in %d days, %s merged, %s", plural(g.RecentPRs, "PR"),
+				recentDays, thousands(g.RecentMerged), engagement(gave)),
 		},
 	)
 
-	asked := m.PRsOpen + m.PRsClosedUnmerged()
 	burden := []Component{
-		{Label: "PRs closed unmerged", Count: float64(m.PRsClosedUnmerged()),
-			Points: points(float64(m.PRsClosedUnmerged()), w.ClosedUnmerged),
-			why:    plural(m.PRsClosedUnmerged(), "PR") + " here closed unmerged"},
 		{Label: "Heavy maintainer involvement", Detail: heavyDetail(m),
 			Count: float64(len(m.HeavyPRs)), Points: points(net, w.Code) - points(gross, w.Code),
 			why: plural(len(m.HeavyPRs), "merged PR") + " here needed heavy maintainer work"},
-		{Label: "Review not yet earned", Detail: fmt.Sprintf("%s asked · %s merged · %s given",
-			thousands(asked), thousands(m.PRsMerged), thousands(m.Participation())),
-			Count: float64(m.Unearned()), Points: points(float64(m.Unearned()), w.Unearned),
-			why: fmt.Sprintf("%s here, %s merged, %s", plural(m.PRsOpened, "PR"), thousands(m.PRsMerged), engagement(m.Participation()))},
+		{Label: "Authoring without engagement", Detail: fmt.Sprintf("%s in %s · %s merged · %s given",
+			plural(m.PRsOpened, "PR"), monthsSpan(m.ActiveDays), thousands(m.PRsMerged), thousands(m.Participation())),
+			Count:  float64(m.PRsOpened),
+			Points: authoringPoints(m.PRsOpened, m.PRsMerged, m.Participation(), float64(m.ActiveDays)/daysPerMonth, w),
+			why:    fmt.Sprintf("%s here, %s merged, %s", plural(m.PRsOpened, "PR"), thousands(m.PRsMerged), engagement(m.Participation()))},
 	}
 
 	var r Result
@@ -237,7 +262,12 @@ func score(m Metrics, w Weights) Result {
 		*grp.total = int(math.Round(sum))
 	}
 	r.Score = r.Here + r.Elsewhere + r.Burden
-	r.Reason = reason(r.Components, float64(r.Here)+min(positive, w.ElsewhereCap))
+	// Elsewhere's gains are ranked at what they're worth after the cap.
+	scale := 1.0
+	if positive > w.ElsewhereCap {
+		scale = w.ElsewhereCap / positive
+	}
+	r.Reason = reason(r.Components, float64(r.Here)+min(positive, w.ElsewhereCap), scale)
 	return r
 }
 
@@ -251,8 +281,13 @@ func heavyDetail(m Metrics) string {
 // reason picks the biggest cost if it's large enough next to what the user
 // earned, and otherwise the biggest source of points. New components feed it
 // without making the summary longer.
-func reason(cs []Component, earned float64) string {
+//
+// elsewhereScale is what Elsewhere's gains are worth after its cap, so 5,000
+// PRs merged elsewhere don't outrank the 24 points earned here when they add
+// only 20 (Copilot on #30).
+func reason(cs []Component, earned, elsewhereScale float64) string {
 	var cost, gain *Component
+	var best float64
 	for i := range cs {
 		c := &cs[i]
 		if c.why == "" {
@@ -261,8 +296,12 @@ func reason(cs []Component, earned float64) string {
 		if c.Points <= reasonMinCost && -c.Points >= reasonShare*earned && (cost == nil || c.Points < cost.Points) {
 			cost = c
 		}
-		if c.Points > 0 && (gain == nil || c.Points > gain.Points) {
-			gain = c
+		worth := c.Points
+		if c.Group == groupElsewhere {
+			worth *= elsewhereScale
+		}
+		if c.Points > 0 && worth > best {
+			gain, best = c, worth
 		}
 	}
 	switch {
@@ -272,6 +311,11 @@ func reason(cs []Component, earned float64) string {
 		return gain.why
 	}
 	return "no activity here or elsewhere"
+}
+
+// monthsSpan describes a span of days in months, at least 1.
+func monthsSpan(days int) string {
+	return plural(max(1, int(math.Round(float64(days)/daysPerMonth))), "month")
 }
 
 // engagement describes a count of issues, threads, and reviews.

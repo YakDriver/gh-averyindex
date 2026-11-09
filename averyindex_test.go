@@ -45,6 +45,8 @@ type fakeSource struct {
 	reviewedQuery             string
 	reviewedErr               error
 	details                   []string // queries of searches with extras
+	comments, reviews         []engaged
+	engagedSince              time.Time
 }
 
 func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
@@ -84,6 +86,11 @@ func (f *fakeSource) MergedPRs(repo, q string, n int) (int, []rawPR, error) {
 	return f.merged, f.prs[:min(n, len(f.prs))], nil
 }
 
+func (f *fakeSource) Engagement(login string, since time.Time) ([]engaged, []engaged, error) {
+	f.engagedSince = since
+	return f.comments, f.reviews, f.err
+}
+
 func (f *fakeSource) ReviewedPRs(repo, q string, minThreads int) ([]rawPR, error) {
 	f.reviewedQuery = fmt.Sprintf("%s %s >=%d", repo, q, minThreads)
 	return f.reviewed, cmp.Or(f.reviewedErr, f.err)
@@ -108,7 +115,7 @@ func day(s string) time.Time {
 
 func TestCollect(t *testing.T) {
 	const r = "repo:o/r"
-	const g = "is:pr author:u is:public -user:u"
+	const g = "is:pr author:u is:public -user:u -repo:o/r"
 	first := searchItem{Number: 1, CreatedAt: day("2020-01-01")}
 	last := searchItem{Number: 9, CreatedAt: day("2026-10-01"), IsPR: true}
 	open := searchItem{Number: 9, CreatedAt: day("2026-10-01"), IsPR: true}
@@ -124,7 +131,6 @@ func TestCollect(t *testing.T) {
 			"|" + g:                                                 {total: 110},
 			"|" + g + " is:merged":                                  {total: 40},
 			"|" + g + " is:open":                                    {total: 30},
-			"|" + g + " is:merged -repo:o/r":                        {total: 34},
 			"|" + g + " created:>=2026-09-29 is:merged":             {total: 2},
 			"|" + g + " created:>=2026-09-29 is:closed is:unmerged": {total: 1},
 			"desc|" + g + " created:>=2026-09-29": {total: 4, items: []searchItem{
@@ -169,7 +175,7 @@ func TestCollect(t *testing.T) {
 	if got := m.CodeCredit(); got != 4.5 {
 		t.Errorf("CodeCredit() = %v, want 4.5 (6 merged × 0.75)", got)
 	}
-	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30, MergedElsewhere: 34,
+	wantGlobal := Global{PRsOpened: 110, PRsMerged: 40, PRsOpen: 30, MergedElsewhere: 40,
 		RecentMerged: 2, RecentClosedUnmerged: 1,
 		RecentPRs: 4, RecentRepos: 3, RecentTopRepo: "b/y", RecentTopCount: 2, RecentSampled: 4}
 	if m.Global != wantGlobal {
@@ -189,13 +195,13 @@ func TestCollectGlobalScope(t *testing.T) {
 	}
 	var global []string
 	for _, q := range src.queries {
-		if !strings.Contains(q, "repo:o/r is:") && !strings.Contains(q, "repo:o/r author:") &&
-			!strings.Contains(q, "repo:o/r commenter:") && strings.Contains(q, "is:pr author:u") {
+		_, query, _ := strings.Cut(q, "|")
+		if strings.Contains(query, "is:pr author:u") && !strings.HasPrefix(query, "repo:o/r") {
 			global = append(global, q)
 		}
 	}
-	if len(global) != 11 {
-		t.Fatalf("got %d global queries, want 11: %q", len(global), global)
+	if len(global) != 8 {
+		t.Fatalf("got %d global queries, want 8: %q", len(global), global)
 	}
 	for _, q := range global {
 		// Own repos are excluded because anyone can merge their own PRs (#1).
@@ -259,7 +265,7 @@ func TestCollectAccountAge(t *testing.T) {
 
 func TestRecentTopRepoTieBreak(t *testing.T) {
 	src := &fakeSource{search: map[string]fakeSearch{
-		"desc|is:pr author:u is:public -user:u created:>=2026-09-29": {total: 2, items: []searchItem{{Repo: "z/z"}, {Repo: "a/a"}}},
+		"desc|is:pr author:u is:public -user:u -repo:o/r created:>=2026-09-29": {total: 2, items: []searchItem{{Repo: "z/z"}, {Repo: "a/a"}}},
 	}}
 	m, _ := collect(src, "o/r", account{Login: "u"}, testNow)
 	if m.Global.RecentTopRepo != "a/a" {
@@ -476,12 +482,13 @@ func TestScore(t *testing.T) {
 		{"one merged", Metrics{PRsOpened: 1, PRsMerged: 1}, 12},
 		{"three merged", Metrics{PRsOpened: 3, PRsMerged: 3}, 24},
 		{"three merged, all rewritten", Metrics{PRsOpened: 3, PRsMerged: 3, RecentMerged: reworked}, 0},
-		{"one closed unmerged", Metrics{PRsOpened: 1}, -3},
+		{"one closed unmerged", Metrics{PRsOpened: 1}, 0},
 		{"a few open PRs are neutral", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
 		// 2 beyond the grace of 3, with nothing earned.
-		{"many open, nothing earned", Metrics{PRsOpened: 5, PRsOpen: 5}, -6},
-		// Earned by 2 merges (6 PRs' worth) and 3 threads.
-		{"many open, earned", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 23},
+		{"5 open in a month, nothing else", Metrics{PRsOpened: 5, PRsOpen: 5}, -4},
+		// 12 PRs against 2 merged and 3 threads: short of balance, so a
+		// small cost.
+		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 17},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1223,7 +1230,7 @@ func TestSprayRepos(t *testing.T) {
 func TestCollectSprayWindowSkipsRecent(t *testing.T) {
 	// Spray starts the day before the 30-day window, so not-landing and
 	// spray never count the same PR (tuning.md, H2e).
-	const q = "is:pr author:u is:public -user:u created:2026-05-02..2026-09-28"
+	const q = "is:pr author:u is:public -user:u -repo:o/r created:2026-05-02..2026-09-28"
 	src := &fakeSource{search: map[string]fakeSearch{"desc|" + q: {total: 3, items: []searchItem{
 		{Repo: "a/a", State: "CLOSED"}, {Repo: "b/b", State: "CLOSED"}, {Repo: "c/c", State: "MERGED"},
 	}}}}
@@ -1373,42 +1380,77 @@ func TestRenderHeavyPRsOnce(t *testing.T) {
 	}
 }
 
-func TestUnearned(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		m    Metrics
-		want int
-	}{
-		{"a few waiting", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
-		// A1's case: 37 open, 3 closed, 1 merged, nothing else.
-		{"asking far beyond earned", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37}, 34},
-		{"slow queue, long record", Metrics{PRsOpened: 280, PRsMerged: 252, PRsOpen: 28, Threads: 300}, 0},
-		{"engagement earns review", Metrics{PRsOpened: 10, PRsOpen: 10, Issues: 4, Threads: 3}, 0},
-	} {
-		if got := tt.m.Unearned(); got != tt.want {
-			t.Errorf("%s: Unearned() = %d, want %d", tt.name, got, tt.want)
-		}
+func TestAuthoringPointsRate(t *testing.T) {
+	// Authoring only, 6 PRs and 1 merge. In a month that's a burst. Over two
+	// years it's an ordinary occasional contributor.
+	burst := authoringPoints(6, 1, 0, 1, defaultWeights)
+	slow := authoringPoints(6, 1, 0, 24, defaultWeights)
+	if burst > -3 || slow < -0.2 {
+		t.Errorf("burst %.1f, slow %.1f", burst, slow)
 	}
-	g := Global{RecentElsewhereOpen: 28, RecentElsewhereMerged: 1, RecentElsewhereThreads: 2}
-	if got := g.UnearnedElsewhere(); got != 20 {
-		t.Errorf("UnearnedElsewhere() = %d, want 20 (28 open − 3 − 2 − grace 3)", got)
+	// A1: 41 PRs in about a month costs the full amount.
+	if full, a1 := authoringPoints(41, 1, 0, 0.1, defaultWeights), authoringPoints(41, 1, 0, 1.1, defaultWeights); full != a1 {
+		t.Errorf("A1 at 37 a month should pay in full: %.1f vs %.1f", a1, full)
 	}
 }
 
-func TestCollectElsewhereEngagementQueries(t *testing.T) {
-	src := &fakeSource{}
-	if _, err := collect(src, "o/r", account{Login: "u"}, testNow); err != nil {
+func TestAuthoringPoints(t *testing.T) {
+	w := defaultWeights
+	for _, tt := range []struct {
+		name              string
+		prs, merged, gave int
+		lo, hi            float64
+	}{
+		{"a few PRs", 3, 0, 0, 0, 0},
+		// An AI PR factory: A1's numbers.
+		{"many PRs, one merged, nothing else", 41, 1, 0, -26, -24},
+		{"one merge, a few waiting, in a month", 7, 1, 0, -6.2, -5.8},
+		// YakDriver: 1,797 PRs, 101 closed, but 1,686 merged and 2,040
+		// issues, comments, and reviews.
+		{"authors and reviews", 1797, 1686, 2040, 0, 0},
+		{"merges alone balance", 30, 30, 0, 0, 0},
+		{"reviews alone balance", 20, 0, 20, 0, 0},
+		{"about half balanced costs about a quarter", 19, 5, 5, -4.8, -4.4},
+	} {
+		if got := authoringPoints(tt.prs, tt.merged, tt.gave, 1, w); got < tt.lo || got > tt.hi {
+			t.Errorf("%s: authoringPoints(%d, %d, %d) = %.1f, want %.1f to %.1f", tt.name, tt.prs, tt.merged, tt.gave, got, tt.lo, tt.hi)
+		}
+	}
+}
+
+func TestCollectElsewhereEngagement(t *testing.T) {
+	at := testNow.AddDate(0, 0, -5)
+	old := testNow.AddDate(0, 0, -40)
+	src := &fakeSource{
+		comments: []engaged{
+			{Repo: "a/b", Owner: "a", Number: 1, Author: "x", At: at},
+			{Repo: "a/b", Owner: "a", Number: 1, Author: "x", At: at},  // same thread twice
+			{Repo: "a/b", Owner: "a", Number: 2, Author: "u", At: at},  // own thread
+			{Repo: "a/b", Owner: "a", Number: 3, Author: "x", At: old}, // before the window
+			{Repo: "o/r", Owner: "o", Number: 4, Author: "x", At: at},  // the scored repo
+			{Repo: "u/p", Owner: "u", Number: 5, Author: "x", At: at},  // own repo
+			{Repo: "c/d", Owner: "c", Number: 6, Author: "x", At: at, Private: true},
+			{Repo: "e/f", Owner: "e", Number: 7, At: at}, // author's account deleted
+		},
+		reviews: []engaged{{Repo: "a/b", Owner: "a", Number: 9, Author: "x", At: at}, {Repo: "o/r", Owner: "o", Number: 10, At: at}},
+	}
+	m, err := collect(src, "o/r", account{Login: "u"}, testNow)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"|is:pr author:u is:public -user:u -repo:o/r created:>=2026-09-29 is:open",
-		"|is:pr author:u is:public -user:u -repo:o/r created:>=2026-09-29 is:merged",
-		"|is:issue author:u is:public -user:u -repo:o/r created:>=2026-09-29",
-		"|commenter:u -author:u -reviewed-by:u is:public -user:u -repo:o/r updated:>=2026-09-29",
-		"|is:pr reviewed-by:u -author:u is:public -user:u -repo:o/r updated:>=2026-09-29",
-	} {
-		if !slices.Contains(src.queries, want) {
-			t.Errorf("missing query %q", want)
+	if m.Global.RecentThreads != 2 || m.Global.RecentReviews != 1 {
+		t.Errorf("threads %d, reviews %d, want 2 and 1", m.Global.RecentThreads, m.Global.RecentReviews)
+	}
+	if !src.engagedSince.Equal(testNow.AddDate(0, 0, -recentDays)) {
+		t.Errorf("engagement since %v", src.engagedSince)
+	}
+	if want := "|is:issue author:u is:public -user:u -repo:o/r created:>=2026-09-29"; !slices.Contains(src.queries, want) {
+		t.Errorf("missing query %q", want)
+	}
+	// Copilot on #30: elsewhere leaves out the scored repo.
+	for _, q := range src.queries {
+		if strings.Contains(q, "-user:u") && !strings.Contains(q, "-repo:o/r") {
+			t.Errorf("elsewhere query includes the scored repo: %q", q)
 		}
 	}
 }
@@ -1443,8 +1485,8 @@ func TestRenderSummaryIsTwoLines(t *testing.T) {
 	if err := renderSummary(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
-	want := "u in o/r  ·  ➜ averyindex -15\n" +
-		"  Here +12  ·  Elsewhere +0  ·  Burden -27  ·  41 PRs here, 1 merged, no issues, comments, or reviews\n"
+	want := "u in o/r  ·  ➜ averyindex -13\n" +
+		"  Here +12  ·  Elsewhere +0  ·  Burden -25  ·  41 PRs here, 1 merged, no issues, comments, or reviews\n"
 	if buf.String() != want {
 		t.Errorf("summary:\n%s\nwant:\n%s", buf.String(), want)
 	}
@@ -1459,5 +1501,14 @@ func TestScorePartsAddUp(t *testing.T) {
 	}
 	if r.Burden > 0 {
 		t.Errorf("burden is positive: %d", r.Burden)
+	}
+}
+
+func TestReasonUsesCappedElsewhere(t *testing.T) {
+	// Copilot on #30: 5,000 PRs merged elsewhere add 20 after the cap, less
+	// than 3 merged here.
+	m := Metrics{PRsOpened: 3, PRsMerged: 3, Global: Global{AccountAgeDays: 3000, MergedElsewhere: 5000}}
+	if got := score(m, defaultWeights).Reason; got != "3 PRs merged here" {
+		t.Errorf("reason = %q", got)
 	}
 }

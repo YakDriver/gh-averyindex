@@ -110,7 +110,7 @@ func pad(s string, width int) string {
 }
 
 func renderGlobal(w io.Writer, g Global) {
-	fmt.Fprintln(w, "\nElsewhere on GitHub (public repos the user doesn't own)")
+	fmt.Fprintln(w, "\nElsewhere on GitHub (other public repos the user doesn't own)")
 	created := "unknown"
 	if !g.AccountCreated.IsZero() {
 		created = fmt.Sprintf("%s (%s ago)", date(g.AccountCreated), age(g.AccountAgeDays))
