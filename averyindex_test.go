@@ -483,8 +483,9 @@ func TestScore(t *testing.T) {
 		want int
 	}{
 		{"nothing", Metrics{}, 0},
-		{"one merged", Metrics{PRsOpened: 1, PRsMerged: 1}, 12},
-		{"three merged", Metrics{PRsOpened: 3, PRsMerged: 3}, 24},
+		// The first few count less: one merge is a thin record.
+		{"one merged", Metrics{PRsOpened: 1, PRsMerged: 1}, 5},
+		{"three merged", Metrics{PRsOpened: 3, PRsMerged: 3}, 12},
 		{"three merged, all rewritten", Metrics{PRsOpened: 3, PRsMerged: 3, RecentMerged: reworked}, 0},
 		{"one closed unmerged", Metrics{PRsOpened: 1}, 0},
 		{"a few open PRs are neutral", Metrics{PRsOpened: 3, PRsOpen: 3}, 0},
@@ -492,7 +493,7 @@ func TestScore(t *testing.T) {
 		{"5 open in a month, nothing else", Metrics{PRsOpened: 5, PRsOpen: 5}, -4},
 		// 12 PRs in a month against 2 merged and 3 threads: well short of
 		// balance.
-		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 11},
+		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -858,10 +859,10 @@ func TestRenderTextPointsAtScore(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(buf.String(), "\n")
-	if want := "u in o/r  ·  ➜ averyindex 24"; lines[0] != want {
+	if want := "u in o/r  ·  ➜ averyindex 12"; lines[0] != want {
 		t.Errorf("header = %q, want %q", lines[0], want)
 	}
-	if want := "  Here +24  ·  Elsewhere +0  ·  Burden +0  ·  3 PRs merged here"; lines[1] != want {
+	if want := "  Here +12  ·  Elsewhere +0  ·  Burden +0  ·  3 PRs merged here"; lines[1] != want {
 		t.Errorf("parts = %q, want %q", lines[1], want)
 	}
 	// The final score row lines up with the component rows above it.
@@ -982,7 +983,7 @@ func TestRenderTextHighlightsScore(t *testing.T) {
 	}
 	// The header score and the final score row are highlighted, and nothing
 	// else changes.
-	header := "u in o/r  ·  \033[1m➜ averyindex 24\033[0m\n"
+	header := "u in o/r  ·  \033[1m➜ averyindex 12\033[0m\n"
 	if !strings.HasPrefix(color.String(), header) {
 		t.Errorf("header = %q", strings.SplitN(color.String(), "\n", 2)[0])
 	}
@@ -1141,7 +1142,7 @@ func TestRenderText(t *testing.T) {
 		`Last 30 days +150 PRs · 0 merged · 0 closed unmerged · 150 open`,
 		`\n +across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
 		`Elsewhere [+-]\d+ \(gains \+20\.0 of 20, costs -[\d.]+\)`,
-		`Cap \(\+48\.1 of gains counts as \+20\) +-28\.1`,
+		`Cap \(\+39\.6 of gains counts as \+20\) +-19\.6`,
 		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {
 		if !regexp.MustCompile(want).MatchString(out) {
@@ -1186,7 +1187,7 @@ func TestRenderJSON(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
 	}
-	if got["user"] != "u" || got["averyindex"] != float64(24) || got["here"] != float64(24) ||
+	if got["user"] != "u" || got["averyindex"] != float64(12) || got["here"] != float64(12) ||
 		got["burden"] != float64(0) || got["reason"] != "3 PRs merged here" {
 		t.Errorf("unexpected JSON: %s", buf.String())
 	}
@@ -1620,8 +1621,8 @@ func TestRenderSummaryIsTwoLines(t *testing.T) {
 	if err := renderSummary(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
-	want := "u in o/r  ·  ➜ averyindex -38\n" +
-		"  Here +12  ·  Elsewhere +0  ·  Burden -50  ·  41 PRs here, 37 open, 1 merged, no issues, comments, or reviews\n"
+	want := "u in o/r  ·  ➜ averyindex -45\n" +
+		"  Here +5  ·  Elsewhere +0  ·  Burden -50  ·  41 PRs here, 37 open, 1 merged, no issues, comments, or reviews\n"
 	if buf.String() != want {
 		t.Errorf("summary:\n%s\nwant:\n%s", buf.String(), want)
 	}

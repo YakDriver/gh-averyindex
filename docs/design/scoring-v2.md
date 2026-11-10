@@ -97,6 +97,33 @@ someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -33
 
 The private check script also tests ordering pairs: A1, S2, and the scheme example rank below every good comparison author, every maintainer ranks above every tracked author, and A1 is among the 3 lowest.
 
+## Calibration (98 authors, 2026-11-10)
+
+Instead of tuning one author at a time, we rated a set of authors first and then checked the equations against the ratings.
+
+- **Authors.** 48 from the comparison above, and 50 sampled from people who opened PRs in terraform-provider-aws since 2026-07-01, stratified by how their PRs went: only open, closed with none merged, a few merges, and 8 or more PRs.
+- **Ratings.** Each author's record was read without the score: their newest PRs here and elsewhere, sizes, outcomes, who merged them, and engagement. Each got one of five bands, framed as a maintainer's workflow: **No** (below 0), **Not yet** (0 to 14), **Look** (15 to 39), **Yes** (40 to 99), and **Regular** (100 and up). Two passes were made, and the second resolved the disagreements.
+- **One rule from the maintainer:** a record elsewhere isn't enough for Yes by itself. Under a vouch model, someone who can't open PRs can still open issues, comment, review, and upvote here. So Elsewhere stays capped at +20, below Yes.
+- **Separation first.** The measure is how often an author scores at or below someone in a lower band, and how many land in their band. Roughly right is the goal, not matching each target.
+
+What the ratings showed: the scores ran about one band high. Of 21 Not yet authors, 14 scored in Look. Thin records got too much from their first merge or first few upvotes. One 4-line merge and two upvotes made Here +20.
+
+Two changes fixed most of that:
+
+- **Gains are shifted so the first items count less.** Gains use `w × (log2(1 + n + 2) − log2(3))`. One merge is 5 points instead of 12, three are 12 instead of 24, and 1,000 are 101 instead of 120. Costs keep the plain curve.
+- **👍 weighs 2.5, down from 5.** Upvotes from other accounts are easy to collect and, at 5, put authors with no merges into Look or Yes.
+
+| | Before | After |
+|---|---|---|
+| Non-member authors in their band | 52 of 87 | 63 of 87 |
+| Cross-band pairs out of order | 7.4% | 7.2% |
+| Median score, Not yet / Look / Yes | 22 / 35 / 92 | 12 / 22 / 54 |
+| A1 | −33 (Here +20) | −46 (Here +7) |
+
+A free fit of all 18 weights did better on the authors it was fitted to, but no better under cross-validation (7.4% of pairs out of order, against 7.1% for the hand-set weights), so it wasn't adopted. Tying Elsewhere to activity here made the order worse (8% of pairs). Lowering the cap to 15 helped the order a little (6.8%) but put two fewer authors in their band, so the cap stays at 20.
+
+**Org members score low when they work mostly outside the repo.** Of the 11 maintainers and staff, three score 31 to 55 because they've authored few PRs here. They don't need a vouch, so this matters only for how the number reads.
+
 ## Open questions
 
 - **Elsewhere for thin records.** Authoring without engagement elsewhere covers someone sending other repos a lot of PRs right now. Two gaps remain. Account age credits an account that sat idle for years the same as one that was active. Merges in tiny team-project repos count like any others. A1 got 20 from those until the open PRs elsewhere took it back. Options: credit only months with activity, or weight merges by the repo's reach. Both need their own test.

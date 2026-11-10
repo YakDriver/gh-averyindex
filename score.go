@@ -22,22 +22,25 @@ const (
 	groupBurden    = "Burden"
 )
 
-// Weights are hand-set, not fitted or statistically derived. They were tuned
-// on about 50 authors whose patterns a maintainer already knew, then checked
-// for ordering: whether A ranks above B. Point values and the zero point
-// aren't calibrated. Randomly changing every weight by ±25% flips about 1% of
-// pairwise orderings but changes the sign of a borderline score often, so
-// don't read "below 0" as a measured threshold. See docs/design/scoring-v2.md.
+// Weights are hand-set, then checked against 98 terraform-provider-aws
+// authors rated by reading their records without the score. About 7 in 10
+// land in the band the rating picked: below 0 for a factory or spray, 0 to 14
+// for not yet, 15 to 39 for look closer, 40 to 99 for a real record here, and
+// 100 and up for a regular. GainOffset and the ThumbsUp weight were changed to
+// fit those ratings. Randomly changing every weight by ±25% flips about 2% of
+// pairwise orderings. Band edges aren't exact. See docs/design/scoring-v2.md.
 //
-// Weights are points per doubling of each count. Every count goes through
-// log2(1+n), so the first few contributions matter most and huge counts don't
-// drown out everything else: with a weight of 12, 1 merged PR with full credit
-// is 12 points, 3 is 24, 7 is 36.
+// Weights are points per doubling of each count. Gains go through gain and
+// costs through points, so the first few contributions matter most and huge
+// counts don't drown out everything else.
 //
 // Signals that depend on someone else's judgment (a maintainer merged it and
 // didn't rewrite it, other users upvoted it) weigh more than signals the user
 // produces alone (comments, issues), because they're harder to inflate.
 type Weights struct {
+	// GainOffset shifts every gain's curve. See gain.
+	GainOffset float64
+
 	// Here.
 	Code     float64
 	ThumbsUp float64
@@ -75,8 +78,10 @@ type Weights struct {
 }
 
 var defaultWeights = Weights{
+	GainOffset: 2,
+
 	Code:     12,
-	ThumbsUp: 5,
+	ThumbsUp: 2.5,
 	Reviews:  5,
 	Threads:  2,
 	Issues:   2,
@@ -177,6 +182,19 @@ type Result struct {
 	elsewhereGains, elsewhereCap float64
 }
 
+// gain is points for a gain: weight per doubling, with the curve shifted by
+// GainOffset so the first few items count less. With an offset of 2, 1 merged
+// PR is worth 5 points, 3 are 12, and 1,000 are 101. Without it, one 4-line
+// merge and two upvotes made Here +20, which reads like a real record
+// (calibration on 98 authors, 2026-11-10).
+func gain(n, weight float64, w Weights) float64 {
+	if n <= 0 {
+		return 0
+	}
+	return weight * (math.Log2(1+n+w.GainOffset) - math.Log2(1+w.GainOffset))
+}
+
+// points is weight per doubling of n, for costs.
 func points(n, weight float64) float64 {
 	if n <= 0 {
 		return 0
@@ -205,27 +223,27 @@ func score(m Metrics, w Weights) Result {
 	net := m.CodeCredit()
 	here := []Component{
 		{Label: "Merged PRs", Detail: fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit()),
-			Count: gross, Points: points(gross, w.Code), why: plural(m.PRsMerged, "PR") + " merged here"},
-		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: points(float64(m.ThumbsUp), w.ThumbsUp),
+			Count: gross, Points: gain(gross, w.Code, w), why: plural(m.PRsMerged, "PR") + " merged here"},
+		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: gain(float64(m.ThumbsUp), w.ThumbsUp, w),
 			why: plural(m.ThumbsUp, "upvote") + " here"},
-		{Label: "PRs reviewed", Count: float64(m.Reviews), Points: points(float64(m.Reviews), w.Reviews),
+		{Label: "PRs reviewed", Count: float64(m.Reviews), Points: gain(float64(m.Reviews), w.Reviews, w),
 			why: "reviewed " + plural(m.Reviews, "PR") + " here"},
-		{Label: "Threads commented", Count: float64(m.Threads), Points: points(float64(m.Threads), w.Threads),
+		{Label: "Threads commented", Count: float64(m.Threads), Points: gain(float64(m.Threads), w.Threads, w),
 			why: "commented on " + plural(m.Threads, "thread") + " here"},
-		{Label: "Issues opened", Count: float64(m.Issues), Points: points(float64(m.Issues), w.Issues),
+		{Label: "Issues opened", Count: float64(m.Issues), Points: gain(float64(m.Issues), w.Issues, w),
 			why: "opened " + plural(m.Issues, "issue") + " here"},
 	}
 
 	elsewhere := []Component{
-		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge),
+		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: gain(months, w.AccountAge, w),
 			why: "account " + age(g.AccountAgeDays) + " old"},
 		{Label: "PRs merged elsewhere", Detail: acceptedDetail(g), Count: g.AcceptedMergedElsewhere(),
-			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere), why: mergedElsewhereWhy(g)},
+			Points: gain(g.AcceptedMergedElsewhere(), w.MergedElsewhere, w), why: mergedElsewhereWhy(g)},
 		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),
-			Count: float64(g.ProjectStars), Points: points(float64(g.ProjectStars), w.ProjectStars),
+			Count: float64(g.ProjectStars), Points: gain(float64(g.ProjectStars), w.ProjectStars, w),
 			why: plural(g.ProjectStars, "star") + " on own projects"},
 		{Label: "Contributors to own projects", Count: float64(g.Contributors),
-			Points: points(float64(g.Contributors), w.Contributors), why: plural(g.Contributors, "contributor") + " to own projects"},
+			Points: gain(float64(g.Contributors), w.Contributors, w), why: plural(g.Contributors, "contributor") + " to own projects"},
 	}
 	var positive float64
 	for _, c := range elsewhere {
@@ -287,7 +305,7 @@ func score(m Metrics, w Weights) Result {
 
 	burden := []Component{
 		{Label: "Heavy maintainer involvement", Detail: heavyDetail(m),
-			Count: float64(len(m.HeavyPRs)), Points: points(net, w.Code) - points(gross, w.Code),
+			Count: float64(len(m.HeavyPRs)), Points: gain(net, w.Code, w) - gain(gross, w.Code, w),
 			why: plural(len(m.HeavyPRs), "merged PR") + " here needed heavy maintainer work"},
 		{Label: "Authoring without engagement", Detail: fmt.Sprintf("%s · %.1f a month · %s merged · %s given",
 			plural(m.PRsOpened, "PR"), hereRate(m), thousands(m.PRsMerged), thousands(m.Participation())),
