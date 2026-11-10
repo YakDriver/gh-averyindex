@@ -1628,6 +1628,26 @@ func TestRenderSummaryIsTwoLines(t *testing.T) {
 	}
 }
 
+func TestRenderHint(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		md   meta
+		want string
+	}{
+		{"piped", meta{}, ""},
+		{"terminal, no color", meta{Terminal: true}, "  --explain for the full report\n"},
+		{"terminal, color", meta{Terminal: true, Color: true}, "  \033[2m--explain for the full report\033[0m\n"},
+	} {
+		var buf bytes.Buffer
+		if err := renderHint(&buf, tt.md); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != tt.want {
+			t.Errorf("%s: %q, want %q", tt.name, buf.String(), tt.want)
+		}
+	}
+}
+
 func TestScorePartsAddUp(t *testing.T) {
 	m := Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2,
 		Global: Global{AccountAgeDays: 1500, PRsMerged: 37, RecentPRs: 69, RecentMerged: 1, RecentClosedUnmerged: 4}}
