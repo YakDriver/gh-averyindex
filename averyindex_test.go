@@ -492,7 +492,7 @@ func TestScore(t *testing.T) {
 		{"5 open in a month, nothing else", Metrics{PRsOpened: 5, PRsOpen: 5}, -4},
 		// 12 PRs in a month against 2 merged and 3 threads: well short of
 		// balance.
-		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 13},
+		{"many open, some engagement", Metrics{PRsOpened: 12, PRsMerged: 2, PRsOpen: 10, Threads: 3}, 11},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1127,7 +1127,7 @@ func TestRenderText(t *testing.T) {
 		"#71  open since 2026-10-20",
 		"and 11 more open",
 		"Rework checked on the 1 most recent merged PRs.",
-		"Code credit (1,200 merged × 0.88)",
+		"Merged PRs (1,200 merged × 0.88)",
 		"Elsewhere on GitHub",
 		"averyindex",
 	} {
@@ -1140,7 +1140,8 @@ func TestRenderText(t *testing.T) {
 		`PRs opened +1,300 · 1,250 merged · 12 open · 38 closed unmerged`,
 		`Last 30 days +150 PRs · 0 merged · 0 closed unmerged · 150 open`,
 		`\n +across 2 repos \(most: 70 in o/r\), repos from the newest 100`,
-		`Cap \(benefit of the doubt is at most \+20\) +-28\.1`,
+		`Elsewhere [+-]\d+ \(gains \+20\.0 of 20, costs -[\d.]+\)`,
+		`Cap \(\+48\.1 of gains counts as \+20\) +-28\.1`,
 		`Own projects +0 stars on 0 repos with 3\+ · 0 contributors`,
 	} {
 		if !regexp.MustCompile(want).MatchString(out) {
@@ -1212,8 +1213,9 @@ func TestSprayPoints(t *testing.T) {
 		repos  int
 		lo, hi float64
 	}{
-		{0, 0, 0}, {1, -0.1, 0}, {5, -0.4, -0.1}, {11, -1.5, -1.1}, {15, -3.5, -3.0},
-		{20, -7.6, -7.3}, {30, -14, -13.6}, {50, -14.9, -14.8}, {500, -14.95, -14.85},
+		// Reviewer on #30: at -25, heavy spray outweighs the +20 Elsewhere cap.
+		{0, 0, 0}, {1, -0.1, 0}, {5, -0.5, -0.3}, {11, -2.4, -2.0}, {15, -5.6, -5.2},
+		{20, -12.5, -12.1}, {30, -23.1, -22.8}, {50, -24.9, -24.7}, {500, -24.9, -24.7},
 	} {
 		if got := sprayPoints(tt.repos, defaultWeights); got < tt.lo || got > tt.hi {
 			t.Errorf("sprayPoints(%d) = %.2f, want %.1f to %.1f", tt.repos, got, tt.lo, tt.hi)
@@ -1389,13 +1391,13 @@ func TestRenderHeavyPRsOnce(t *testing.T) {
 func TestAuthoringPointsRate(t *testing.T) {
 	// Authoring only, 6 PRs and 1 merge. In a month that's a burst. Over two
 	// years it's an ordinary occasional contributor.
-	burst := authoringPoints(6, 1, 0, 6, defaultWeights)
-	slow := authoringPoints(6, 1, 0, 6.0/24, defaultWeights)
+	burst := authoringPoints(6, 1, 0, 6, 1, defaultWeights)
+	slow := authoringPoints(6, 1, 0, 6.0/24, 1, defaultWeights)
 	if burst > -3 || slow < -0.2 {
 		t.Errorf("burst %.1f, slow %.1f", burst, slow)
 	}
 	// A1: 41 PRs in about a month costs the full amount.
-	if full, a1 := authoringPoints(41, 1, 0, 410, defaultWeights), authoringPoints(41, 1, 0, 41/1.1, defaultWeights); full != a1 {
+	if full, a1 := authoringPoints(41, 1, 0, 410, 1, defaultWeights), authoringPoints(41, 1, 0, 41/1.1, 1, defaultWeights); full != a1 {
 		t.Errorf("A1 at 37 a month should pay in full: %.1f vs %.1f", a1, full)
 	}
 }
@@ -1421,7 +1423,7 @@ func TestAuthoringPoints(t *testing.T) {
 		{"A1 with 40 comments", 41, 1, 40, -14.5, -13.5},
 		{"about half short", 19, 5, 20, -4.8, -4.4},
 	} {
-		if got := authoringPoints(tt.prs, tt.merged, tt.gave, float64(tt.prs), w); got < tt.lo || got > tt.hi {
+		if got := authoringPoints(tt.prs, tt.merged, tt.gave, float64(tt.prs), 1, w); got < tt.lo || got > tt.hi {
 			t.Errorf("%s: authoringPoints(%d, %d, %d) = %.1f, want %.1f to %.1f", tt.name, tt.prs, tt.merged, tt.gave, got, tt.lo, tt.hi)
 		}
 	}
@@ -1508,7 +1510,7 @@ func TestScoreCarriedFromFlags(t *testing.T) {
 	// Not a factory, so Burden is about 0.
 	slow := score(Metrics{PRsOpened: 10, PRsMerged: 3, PRsOpen: 7, Threads: 5, ActiveDays: 400, RecentPRs: 3,
 		Global: Global{AccountAgeDays: 1487}}, defaultWeights)
-	if slow.Burden < -1 {
+	if slow.Burden < -2 {
 		t.Errorf("slow review queue: Burden %d", slow.Burden)
 	}
 }
@@ -1560,7 +1562,14 @@ func TestReason(t *testing.T) {
 		{"self-merged elsewhere", Metrics{Global: Global{AccountAgeDays: 30, PRsMerged: 1645, AcceptedSampled: 100, AcceptedElsewhere: 21}},
 			"1,645 PRs merged elsewhere, 21% accepted by others"},
 		{"asking far beyond earned", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ThumbsUp: 2},
-			"41 PRs here, 1 merged, no issues, comments, or reviews"},
+			"41 PRs here, 37 open, 1 merged, no issues, comments, or reviews"},
+		// Reviewer on #30: the reason states the pace the cost is about.
+		{"pace", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ActiveDays: 36, RecentPRs: 35,
+			FirstAuthored: &searchItem{Number: 1, IsPR: true}},
+			"41 PRs here in 5 weeks, 37 open, 1 merged, no issues, comments, or reviews"},
+		{"recent burst after an old issue", Metrics{PRsOpened: 41, PRsMerged: 1, PRsOpen: 37, ActiveDays: 1100, RecentPRs: 38,
+			FirstAuthored: &searchItem{Number: 1}},
+			"41 PRs here, 38 in 30 days, 37 open, 1 merged, no issues, comments, or reviews"},
 		// A cost that's small next to what was earned isn't the story.
 		{"veteran with closed PRs", Metrics{PRsOpened: 1800, PRsMerged: 1686, PRsOpen: 10, Reviews: 1117},
 			"1,686 PRs merged here"},
@@ -1581,8 +1590,8 @@ func TestRenderSummaryIsTwoLines(t *testing.T) {
 	if err := renderSummary(&buf, m, score(m, defaultWeights), testMeta); err != nil {
 		t.Fatal(err)
 	}
-	want := "u in o/r  ·  ➜ averyindex -13\n" +
-		"  Here +12  ·  Elsewhere +0  ·  Burden -25  ·  41 PRs here, 1 merged, no issues, comments, or reviews\n"
+	want := "u in o/r  ·  ➜ averyindex -38\n" +
+		"  Here +12  ·  Elsewhere +0  ·  Burden -50  ·  41 PRs here, 37 open, 1 merged, no issues, comments, or reviews\n"
 	if buf.String() != want {
 		t.Errorf("summary:\n%s\nwant:\n%s", buf.String(), want)
 	}

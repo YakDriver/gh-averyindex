@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 // averyindex is the sum of three scores (docs/design/scoring-v2.md):
@@ -21,6 +22,13 @@ const (
 	groupBurden    = "Burden"
 )
 
+// Weights are hand-set, not fitted or statistically derived. They were tuned
+// on about 50 authors whose patterns a maintainer already knew, then checked
+// for ordering: whether A ranks above B. Point values and the zero point
+// aren't calibrated. Randomly changing every weight by ±25% flips about 1% of
+// pairwise orderings but changes the sign of a borderline score often, so
+// don't read "below 0" as a measured threshold. See docs/design/scoring-v2.md.
+//
 // Weights are points per doubling of each count. Every count goes through
 // log2(1+n), so the first few contributions matter most and huge counts don't
 // drown out everything else: with a weight of 12, 1 merged PR with full credit
@@ -58,7 +66,12 @@ type Weights struct {
 	Authoring         float64
 	AuthoringTarget   float64
 	AuthoringFullRate float64
-	EngagementCredit  float64
+	// AuthoringMaxRate caps the rate multiplier here: at AuthoringFullRate
+	// PRs a month it's 1, and it keeps rising to AuthoringMaxRate. Elsewhere
+	// it stops at 1, because a prolific author can have a big review
+	// backlog across many repos without being a factory.
+	AuthoringMaxRate float64
+	EngagementCredit float64
 }
 
 var defaultWeights = Weights{
@@ -74,13 +87,14 @@ var defaultWeights = Weights{
 	Contributors:    4,
 	ElsewhereCap:    20,
 	NotLanding:      -6,
-	SprayMax:        -15,
+	SprayMax:        -25,
 	SprayMid:        20,
 	SpraySteep:      4,
 
 	Authoring:         -5,
 	AuthoringTarget:   1,
 	AuthoringFullRate: 10,
+	AuthoringMaxRate:  2,
 	EngagementCredit:  0.25,
 }
 
@@ -101,15 +115,16 @@ const authoringGrace = 3
 //
 // It's also a rate. Someone who opens a PR every month or two and does
 // nothing else is authoring only, but that's an ordinary contributor. A
-// factory opens dozens a month. The cost is full at AuthoringFullRate PRs a
-// month, and scales down below that.
-func authoringPoints(prs, merged, gave int, perMonth float64, w Weights) float64 {
+// factory opens dozens a month. The rate multiplier is 1 at
+// AuthoringFullRate PRs a month, smaller below that, and rises above it up
+// to maxRate, so 35 a month costs more than 10.
+func authoringPoints(prs, merged, gave int, perMonth, maxRate float64, w Weights) float64 {
 	if prs <= authoringGrace {
 		return 0
 	}
 	earned := float64(merged) + w.EngagementCredit*float64(gave)
 	short := max(0, 1-earned/(w.AuthoringTarget*float64(prs)))
-	return points(float64(prs-authoringGrace), w.Authoring) * short * short * min(1, perMonth/w.AuthoringFullRate)
+	return points(float64(prs-authoringGrace), w.Authoring) * short * short * min(maxRate, perMonth/w.AuthoringFullRate)
 }
 
 // hereRate is the user's PRs here per month: the higher of their rate since
@@ -117,9 +132,13 @@ func authoringPoints(prs, merged, gave int, perMonth float64, w Weights) float64
 // The recent rate keeps one old issue from shielding an account that comes
 // back and sprays.
 func hereRate(m Metrics) float64 {
-	lifetime := float64(m.PRsOpened) / max(1, float64(m.ActiveDays)/daysPerMonth)
-	recent := float64(m.RecentPRs) / (recentHereDays / daysPerMonth)
-	return max(lifetime, recent)
+	return max(hereLifetimeRate(m), float64(m.RecentPRs)/(recentHereDays/daysPerMonth))
+}
+
+// hereLifetimeRate is PRs here per month since the first issue or PR here,
+// counting less than a month as a month.
+func hereLifetimeRate(m Metrics) float64 {
+	return float64(m.PRsOpened) / max(1, float64(m.ActiveDays)/daysPerMonth)
 }
 
 // sprayPoints is the spray penalty for n repos, shifted so 0 repos is 0.
@@ -151,6 +170,11 @@ type Result struct {
 	Score      int         `json:"averyindex"`
 	// Reason is the biggest factor in the score, in a few words.
 	Reason string `json:"reason"`
+
+	// elsewhereGains and elsewhereCap let the full report show how much of
+	// Elsewhere's benefit of the doubt counted, so a good record isn't
+	// hidden behind a negative total.
+	elsewhereGains, elsewhereCap float64
 }
 
 func points(n, weight float64) float64 {
@@ -180,7 +204,7 @@ func score(m Metrics, w Weights) Result {
 	gross := float64(m.PRsMerged) * m.AvgCredit()
 	net := m.CodeCredit()
 	here := []Component{
-		{Label: "Code credit", Detail: fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit()),
+		{Label: "Merged PRs", Detail: fmt.Sprintf("%s merged × %.2f", thousands(m.PRsMerged), m.AvgCredit()),
 			Count: gross, Points: points(gross, w.Code), why: plural(m.PRsMerged, "PR") + " merged here"},
 		{Label: "Upvotes received", Count: float64(m.ThumbsUp), Points: points(float64(m.ThumbsUp), w.ThumbsUp),
 			why: plural(m.ThumbsUp, "upvote") + " here"},
@@ -210,7 +234,7 @@ func score(m Metrics, w Weights) Result {
 	if positive > w.ElsewhereCap {
 		elsewhere = append(elsewhere, Component{
 			Label:  "Cap",
-			Detail: fmt.Sprintf("benefit of the doubt is at most %+.0f", w.ElsewhereCap),
+			Detail: fmt.Sprintf("%+.1f of gains counts as %+.0f", positive, w.ElsewhereCap),
 			Points: w.ElsewhereCap - positive,
 		})
 	}
@@ -221,7 +245,7 @@ func score(m Metrics, w Weights) Result {
 	resolved := g.RecentResolved()
 	gave := g.RecentGave()
 	open := g.RecentOpen()
-	authoringElsewhere := authoringPoints(open, 0, gave, float64(open)/(recentDays/daysPerMonth), w)
+	authoringElsewhere := authoringPoints(open, 0, gave, float64(open)/(recentDays/daysPerMonth), 1, w)
 	gaveDetail := thousands(gave) + " given"
 	switch {
 	case g.EngagementUnchecked:
@@ -263,7 +287,7 @@ func score(m Metrics, w Weights) Result {
 		{Label: "Authoring without engagement", Detail: fmt.Sprintf("%s · %.1f a month · %s merged · %s given",
 			plural(m.PRsOpened, "PR"), hereRate(m), thousands(m.PRsMerged), thousands(m.Participation())),
 			Count:  float64(m.PRsOpened),
-			Points: authoringPoints(m.PRsOpened, m.PRsMerged, m.Participation(), hereRate(m), w),
+			Points: authoringPoints(m.PRsOpened, m.PRsMerged, m.Participation(), hereRate(m), w.AuthoringMaxRate, w),
 			why:    authoringWhy(m)},
 	}
 
@@ -286,6 +310,7 @@ func score(m Metrics, w Weights) Result {
 		*grp.total = int(math.Round(sum))
 	}
 	r.Score = r.Here + r.Elsewhere + r.Burden
+	r.elsewhereGains, r.elsewhereCap = min(positive, w.ElsewhereCap), w.ElsewhereCap
 	// Elsewhere's gains are ranked at what they're worth after the cap.
 	scale := 1.0
 	if positive > w.ElsewhereCap {
@@ -343,13 +368,41 @@ func reason(cs []Component, earned, elsewhereScale float64) (why string, isCost 
 	return "no activity here or elsewhere", false
 }
 
-// authoringWhy describes the user's PRs here and what else they gave.
+// authoringWhy describes the user's PRs here, at the pace the authoring
+// cost uses, and what else they gave: "41 PRs here in 5 weeks, 37 open, 1
+// merged, no issues, comments, or reviews."
 func authoringWhy(m Metrics) string {
+	pace := plural(m.PRsOpened, "PR") + " here"
+	if m.FirstAuthored != nil {
+		pace += " in " + span(m.ActiveDays)
+	}
+	if recent := float64(m.RecentPRs) / (recentHereDays / daysPerMonth); m.ActiveDays > 2*recentHereDays && recent > hereLifetimeRate(m) {
+		pace = fmt.Sprintf("%s here, %d in %d days", plural(m.PRsOpened, "PR"), m.RecentPRs, recentHereDays)
+	}
+	parts := []string{pace}
+	if m.PRsOpen > 0 {
+		parts = append(parts, thousands(m.PRsOpen)+" open")
+	}
 	merged := "none merged"
 	if m.PRsMerged > 0 {
 		merged = thousands(m.PRsMerged) + " merged"
 	}
-	return fmt.Sprintf("%s here, %s, %s", plural(m.PRsOpened, "PR"), merged, engagement(m.Participation()))
+	return strings.Join(append(parts, merged, engagement(m.Participation())), ", ")
+}
+
+// span describes a stretch of days in the largest unit that reads
+// naturally: days, weeks, months, or years.
+func span(days int) string {
+	days = max(1, days)
+	switch {
+	case days < 14:
+		return plural(days, "day")
+	case days < 60:
+		return plural(int(math.Round(float64(days)/7)), "week")
+	case days < 730:
+		return plural(int(math.Round(float64(days)/daysPerMonth)), "month")
+	}
+	return fmt.Sprintf("%.1f years", float64(days)/365.25)
 }
 
 // mergedElsewhereWhy describes PRs merged elsewhere, with the share someone

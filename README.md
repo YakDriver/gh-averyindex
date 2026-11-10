@@ -11,8 +11,8 @@ YakDriver in hashicorp/terraform-provider-aws  ·  ➜ averyindex 266
 The score is the sum of three parts. **Here** is what the user has given this repo. **Elsewhere** is their record in other repos. **Burden** is what they cost maintainers here, mainly authoring many PRs without engaging. The phrase at the end names the biggest factor. When a cost is big next to what the user has earned, it names the cost. Here's a user who opened 41 PRs in 36 days, with 1 small merge and no other engagement:
 
 ```console
-someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -8
-  Here +20  ·  Elsewhere -3  ·  Burden -25  ·  41 PRs here, 1 merged, no issues, comments, or reviews
+someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -33
+  Here +20  ·  Elsewhere -3  ·  Burden -50  ·  41 PRs here in 5 weeks, 37 open, 1 merged, no issues, comments, or reviews
 ```
 
 `--explain` prints everything behind the score: participation, recent merged PRs with rework, activity elsewhere, and every line of the breakdown.
@@ -55,15 +55,40 @@ Otherwise, run it inside a clone to score against that repository, or pass `-R`.
 **Elsewhere** gives an established developer some benefit of the doubt in a repo they're new to. It counts account age, PRs merged in other people's public repos (weighted by the share someone else merged or approved), and what other people do with the user's own projects (stars and outside contributors). That part is capped at 20, so it can't stand in for work here. Elsewhere leaves out the scored repo. It also counts what the user's record elsewhere costs, with no cap:
 
 - **Not landing:** the last 30 days of PRs weighed against the user's longer history, so a long record cushions a bad month.
-- **Spray:** repos where a PR from the 150 days before that was closed unmerged and none merged.
+- **Spray:** repos where a PR from the 150 days before that was closed unmerged and none merged. It reaches −25, more than the +20 cap, so heavy spray nets negative however good the rest of the record is.
 - **Authoring without engagement elsewhere:** the same measure as in Burden, for PRs from the last 30 days in other repos that are still open. Not-landing covers the ones that resolved, so no PR is charged twice.
 
 **Burden** is what the user costs maintainers here:
 
 - **Heavy maintainer involvement:** a merged PR with 20 or more review threads and 10 or more commits by others earns no credit. A long review the author worked through alone doesn't count.
-- **Authoring without engagement:** the pattern of an AI PR factory, meaning many PRs, fast, with few merged and little else. For each PR, the user should have about one merged PR. An issue, comment, or review of someone else's work counts a quarter as much, because anyone can produce it alone. The cost grows with how far short they fall and how many PRs they opened, past the first 3. It's full at 10 PRs a month, in the last 90 days or since their first issue or PR here, and smaller below that. An occasional contributor who only authors pays little. Closed PRs cost nothing on their own, so someone with many merges pays nothing however many were closed.
+- **Authoring without engagement:** the pattern of an AI PR factory, meaning many PRs, fast, with few merged and little else. For each PR, the user should have about one merged PR. An issue, comment, or review of someone else's work counts a quarter as much, because anyone can produce it alone. The cost grows with how far short they fall and how many PRs they opened, past the first 3. The pace is PRs a month in the last 30 days or since their first issue or PR here, whichever is higher. At 10 a month the cost is at full weight. It's smaller below that, and keeps rising to double at 20 a month. An occasional contributor who only authors pays little. Closed PRs cost nothing on their own, so someone with many merges pays nothing however many were closed.
 
-Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. Exact weights are in the code. The reasoning is in [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/scoring-v2.md](docs/design/scoring-v2.md).
+Signals that depend on someone else's judgment count more than things a person produces alone, because they're harder to inflate. The reasoning is in [docs/design/philosophy.md](docs/design/philosophy.md) and [docs/design/scoring-v2.md](docs/design/scoring-v2.md).
+
+### Scale
+
+Most signals grow with log2(1 + n): each doubling adds the same points, so the first few count most and huge counts can't drown out the rest. These are the points at a few counts:
+
+| Signal | Points per doubling | n = 1 | n = 15 | n = 41 | n = 1,000 |
+|---|---|---|---|---|---|
+| Merged PR here, full credit | 12 | +12 | +48 | +64 | +120 |
+| 👍 received, or PR reviewed | 5 | +5 | +20 | +27 | +50 |
+| Thread commented, or issue opened | 2 | +2 | +8 | +11 | +20 |
+| Elsewhere gains, in total | | capped at +20 | | | |
+| Spray, by repos | | logistic, up to −25 | | | |
+| Authoring without engagement, nothing earned, 10 a month | −5 per doubling past 3 PRs | 0 | −19 | −26 | −50 |
+| Not landing, nothing merged | −6 per doubling | | | −32 | −60 |
+
+Merged PRs count merges, not code size. A 2-line docs fix earns the same as a large feature, because 1 in 5 legitimate merged PRs in the tuning data were 4 lines or fewer.
+
+### How far to trust the numbers
+
+The weights are hand-set. They were tuned on about 50 authors whose patterns a maintainer already knew, and checked by whether A ranks above B for pairs of real accounts. They aren't fitted to data, and the score isn't a probability.
+
+- **The order is robust.** Randomly changing every weight by ±25% flips about 1% of pairwise orderings.
+- **The zero point isn't.** The score adds unlike quantities, so "below 0" isn't a measured threshold. Under the same ±25% changes, a borderline score like −8 changes sign about 1 time in 6.
+- **Zero isn't neutral.** A 5-year-old account with 3 unmerged PRs scores about +9, from account age alone.
+- **Low confidence isn't a low score.** Authors with exactly one merge here score about 18 to 35, legitimate or not. No score separates them. Read the PRs.
 
 ## Limits
 

@@ -74,7 +74,11 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 	for i, c := range r.Components {
 		if c.Group != group {
 			group = c.Group
-			fmt.Fprintf(w, "  %s %+d\n", group, totals[group])
+			header := fmt.Sprintf("%s %+d", group, totals[group])
+			if group == groupElsewhere && r.elsewhereCap > 0 {
+				header += fmt.Sprintf(" (gains %+.1f of %.0f, costs %+.1f)", r.elsewhereGains, r.elsewhereCap, elsewhereCosts(r))
+			}
+			fmt.Fprintf(w, "  %s\n", header)
 		}
 		n := count(c.Count)
 		if c.Label == "Cap" {
@@ -88,6 +92,17 @@ func renderText(w io.Writer, m Metrics, r Result, md meta) error {
 
 	fmt.Fprintf(w, "\naveryindex %s · %s\n", md.Version, md.GeneratedAt.UTC().Format("2006-01-02 15:04 MST"))
 	return nil
+}
+
+// elsewhereCosts is the sum of Elsewhere's costs, not counting the cap.
+func elsewhereCosts(r Result) float64 {
+	var sum float64
+	for _, c := range r.Components {
+		if c.Group == groupElsewhere && c.Label != "Cap" && c.Points < 0 {
+			sum += c.Points
+		}
+	}
+	return sum
 }
 
 // scorePointer marks the score so it's easy to find, in plain text too. It's

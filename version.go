@@ -30,7 +30,8 @@ var version = ""
 //	   own. merged_elsewhere is gone (use global.prs_merged). New:
 //	   active_days and recent_prs, and in global, recent_issues,
 //	   recent_threads, recent_reviews, engagement_truncated, and
-//	   engagement_unchecked.
+//	   engagement_unchecked. The "Code credit" component is now "Merged
+//	   PRs".
 const schemaVersion = 4
 
 // buildInfo is the version and, when known, the commit and its date.

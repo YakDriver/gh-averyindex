@@ -17,7 +17,7 @@ const (
 	// recentDays is the window for recent PR activity across GitHub.
 	recentDays = 30
 	// recentHereDays is the window for the user's recent rate of PRs here.
-	recentHereDays = 90
+	recentHereDays = 30
 	// recentSample is how many recent PRs are examined to count repos.
 	recentSample = 100
 	// minProjectStars is the fewest stars a user's own repo needs before its
