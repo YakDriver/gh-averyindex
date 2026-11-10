@@ -4,15 +4,15 @@ A [gh](https://cli.github.com/) extension that shows how helpful a user has been
 
 ```console
 $ gh averyindex YakDriver
-YakDriver in hashicorp/terraform-provider-aws  ·  ➜ averyindex 266
-  Here +246  ·  Elsewhere +20  ·  Burden +0  ·  1,686 PRs merged here
+YakDriver in hashicorp/terraform-provider-aws  ·  ➜ averyindex 213
+  Here +193  ·  Elsewhere +20  ·  Burden +0  ·  1,686 PRs merged here
 ```
 
 The score is the sum of three parts. **Here** is what the user has given this repo. **Elsewhere** is their record in other repos. **Burden** is what they cost maintainers here, mainly authoring many PRs without engaging. The phrase at the end names the biggest factor. When a cost is big next to what the user has earned, it names the cost. Here's a user who opened 41 PRs in 36 days, with 1 small merge and no other engagement:
 
 ```console
-someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -33
-  Here +20  ·  Elsewhere -3  ·  Burden -50  ·  41 PRs here in 5 weeks, 37 open, 1 merged, no issues, comments, or reviews
+someone in hashicorp/terraform-provider-aws  ·  ➜ averyindex -46
+  Here +7  ·  Elsewhere -3  ·  Burden -50  ·  41 PRs here in 5 weeks, 37 open, 1 merged, no issues, comments, or reviews
 ```
 
 `--explain` prints everything behind the score: participation, recent merged PRs with rework, activity elsewhere, and every line of the breakdown.
@@ -67,13 +67,14 @@ Signals that depend on someone else's judgment count more than things a person p
 
 ### Scale
 
-Most signals grow with log2(1 + n): each doubling adds the same points, so the first few count most and huge counts can't drown out the rest. These are the points at a few counts:
+Gains grow with log2(1 + n), shifted so the first two items count less: each doubling adds about the same points, the first few add less than a full doubling, and huge counts can't drown out the rest. Costs use plain log2(1 + n). These are the points at a few counts:
 
 | Signal | Points per doubling | n = 1 | n = 15 | n = 41 | n = 1,000 |
 |---|---|---|---|---|---|
-| Merged PR here, full credit | 12 | +12 | +48 | +64 | +120 |
-| 👍 received, or PR reviewed | 5 | +5 | +20 | +27 | +50 |
-| Thread commented, or issue opened | 2 | +2 | +8 | +11 | +20 |
+| Merged PR here, full credit | 12 | +5 | +31 | +47 | +101 |
+| PR reviewed | 5 | +2 | +13 | +19 | +42 |
+| 👍 received | 2.5 | +1 | +6 | +10 | +21 |
+| Thread commented, or issue opened | 2 | +1 | +5 | +8 | +17 |
 | Elsewhere gains, in total | | capped at +20 | | | |
 | Spray, by repos | | logistic, up to −25 | | | |
 | Authoring without engagement, nothing earned, 10 a month | −5 per doubling past 3 PRs | 0 | −19 | −26 | −50 |
@@ -81,14 +82,27 @@ Most signals grow with log2(1 + n): each doubling adds the same points, so the f
 
 Merged PRs count merges, not code size. A 2-line docs fix earns the same as a large feature, because 1 in 5 legitimate merged PRs in the tuning data were 4 lines or fewer.
 
+Rough guide to the numbers, from calibration on 98 terraform-provider-aws authors:
+
+| Score | What it usually means |
+|---|---|
+| Below 0 | Costs maintainers: a PR factory, spray, or a scheme |
+| 0 to 14 | Not yet: little here, or warning signs |
+| 15 to 39 | Look: could go either way, so read a PR or two |
+| 40 to 99 | Yes: a real record here |
+| 100 and up | A regular |
+
+Elsewhere is capped at +20, so a record in other repos can't reach 40 by itself. Someone who can't open PRs yet can still earn a Yes here with issues, comments, and reviews.
+
 ### How far to trust the numbers
 
-The weights are hand-set. They were tuned on about 50 authors whose patterns a maintainer already knew, and checked by whether A ranks above B for pairs of real accounts. They aren't fitted to data, and the score isn't a probability.
+The weights are hand-set, then checked against 98 terraform-provider-aws authors. Each author was rated by reading their PRs and record, without the score, into the bands above. Two weights changed to fit those ratings. The score isn't a probability.
 
-- **The order is robust.** Randomly changing every weight by ±25% flips about 1% of pairwise orderings.
-- **The zero point isn't.** The score adds unlike quantities, so "below 0" isn't a measured threshold. Under the same ±25% changes, a borderline score like −8 changes sign about 1 time in 6.
-- **Zero isn't neutral.** A 5-year-old account with 3 unmerged PRs scores about +9, from account age alone.
-- **Low confidence isn't a low score.** Authors with exactly one merge here score about 18 to 35, legitimate or not. No score separates them. Read the PRs.
+- **About 7 in 10 land in the band a reader would pick,** and nearly all the rest are one band off. Most of the misses are in the middle, between Not yet and Look.
+- **The order is robust.** Randomly changing every weight by ±25% flips about 2% of pairwise orderings.
+- **The boundaries aren't exact.** The score adds unlike quantities, so a score near a band edge could go either way.
+- **Zero isn't neutral.** A 5-year-old account with 3 unmerged PRs scores about +7, from account age alone.
+- **Low confidence isn't a low score.** Authors with exactly one merge here score from below 0 to the 30s, legitimate or not. Read the PRs.
 
 ## Limits
 
