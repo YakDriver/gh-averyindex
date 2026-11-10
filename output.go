@@ -129,6 +129,10 @@ func renderGlobal(w io.Writer, g Global) {
 	created := "unknown"
 	if !g.AccountCreated.IsZero() {
 		created = fmt.Sprintf("%s (%s ago)", date(g.AccountCreated), age(g.AccountAgeDays))
+		if g.ActivityChecked {
+			created += fmt.Sprintf(" · active in %s of %d", plural(g.ActiveMonths, "month"),
+				int(math.Ceil(float64(g.AccountAgeDays)/daysPerMonth)))
+		}
 	}
 	rate := "no resolved PRs"
 	if r, ok := g.MergeRate(); ok {

@@ -75,6 +75,9 @@ type source interface {
 	// Engagement returns the user's issue and PR comments and PR reviews
 	// since since, with where and when each happened.
 	Engagement(login string, since time.Time) (activity, error)
+	// ActiveMonths returns how many calendar months from created to now
+	// have at least one contribution on the user's contribution calendar.
+	ActiveMonths(login string, created, now time.Time) (int, error)
 	// OwnedRepos returns the user's public, non-fork repositories with
 	// their star counts, at most the 100 most starred.
 	OwnedRepos(login string) ([]ownedRepo, error)
@@ -787,6 +790,116 @@ func (g *gitHub) reviews(login string, since time.Time) (out []engaged, cut bool
 		vars["after"] = r.PageInfo.EndCursor
 	}
 	return out, true, nil
+}
+
+// errCalendarHidden means the contribution calendar reads as empty even
+// though GitHub lists years with contributions, as it does for a private
+// profile. An empty calendar isn't evidence of an idle account then.
+var errCalendarHidden = errors.New("contribution calendar is hidden")
+
+// calendarYears is how many years of contribution calendar go in one
+// request. A request for 17 years at once failed on a prolific user.
+const calendarYears = 4
+
+// ActiveMonths reads the contribution calendar for every year from created
+// to now, one alias per year, because a contributions collection spans at
+// most a year. Requests of calendarYears years go out in parallel. The
+// calendar counts public contributions, and private ones only if the user
+// chose to show them, so it's the same for anyone who runs the tool.
+func (g *gitHub) ActiveMonths(login string, created, now time.Time) (int, error) {
+	created, now = created.UTC(), now.UTC()
+	var (
+		months   = map[string]bool{}
+		listed   bool
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		errs     []error
+		from, to = created.Format(time.DateOnly), now.Format(time.DateOnly)
+	)
+	for first := created.Year(); first <= now.Year(); first += calendarYears {
+		last := min(first+calendarYears-1, now.Year())
+		wg.Go(func() {
+			got, years, err := g.calendar(login, created, now, first, last)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			listed = listed || years > 0
+			for _, d := range got {
+				// Weeks are padded to whole weeks, so days outside the range
+				// can appear.
+				if d >= from && d <= to {
+					months[d[:7]] = true
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return 0, fmt.Errorf("contribution calendar for %s: %w", login, err)
+	}
+	if len(months) == 0 && listed {
+		return 0, errCalendarHidden
+	}
+	return len(months), nil
+}
+
+// calendar returns the dates with at least one contribution in years first
+// to last, and how many years GitHub lists with contributions.
+func (g *gitHub) calendar(login string, created, now time.Time, first, last int) ([]string, int, error) {
+	var q strings.Builder
+	q.WriteString("query($login: String!) {\n  user(login: $login) {\n    years: contributionsCollection { contributionYears }\n")
+	for y := first; y <= last; y++ {
+		from, to := time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(y, 12, 31, 23, 59, 59, 0, time.UTC)
+		if created.After(from) {
+			from = created
+		}
+		if now.Before(to) {
+			to = now
+		}
+		fmt.Fprintf(&q, "    y%d: contributionsCollection(from: %q, to: %q) { contributionCalendar { weeks { contributionDays { date contributionCount } } } }\n",
+			y, from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	q.WriteString("  }\n}")
+	var resp struct{ User map[string]json.RawMessage }
+	if err := g.gqlDo(q.String(), map[string]any{"login": login}, &resp); err != nil {
+		return nil, 0, err
+	}
+	var years struct{ ContributionYears []int }
+	if raw, ok := resp.User["years"]; ok {
+		if err := json.Unmarshal(raw, &years); err != nil {
+			return nil, 0, err
+		}
+	}
+	var dates []string
+	for k, raw := range resp.User {
+		if k == "years" {
+			continue
+		}
+		var y struct {
+			ContributionCalendar struct {
+				Weeks []struct {
+					ContributionDays []struct {
+						Date              string
+						ContributionCount int
+					}
+				}
+			}
+		}
+		if err := json.Unmarshal(raw, &y); err != nil {
+			return nil, 0, err
+		}
+		for _, w := range y.ContributionCalendar.Weeks {
+			for _, d := range w.ContributionDays {
+				if d.ContributionCount > 0 && len(d.Date) >= 7 {
+					dates = append(dates, d.Date)
+				}
+			}
+		}
+	}
+	return dates, len(years.ContributionYears), nil
 }
 
 const ownedReposQuery = `

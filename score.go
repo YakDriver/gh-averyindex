@@ -45,7 +45,7 @@ type Weights struct {
 	Threads  float64
 	Issues   float64
 
-	// Elsewhere. AccountAge is per doubling of account age in months.
+	// Elsewhere. AccountAge is per doubling of active months.
 	AccountAge      float64
 	MergedElsewhere float64
 	ProjectStars    float64
@@ -197,7 +197,15 @@ const (
 
 func score(m Metrics, w Weights) Result {
 	g := m.Global
-	months := float64(g.AccountAgeDays) / daysPerMonth
+	// Account age counts only months the user was active, so an account
+	// that sat idle for years doesn't look established (#31).
+	months, ageDetail := float64(g.AccountAgeDays)/daysPerMonth, age(g.AccountAgeDays)
+	ageWhy := "account " + age(g.AccountAgeDays) + " old"
+	if g.ActivityChecked {
+		months = float64(g.ActiveMonths)
+		ageDetail += " · " + plural(g.ActiveMonths, "active month")
+		ageWhy = fmt.Sprintf("account %s old, active %d months", age(g.AccountAgeDays), g.ActiveMonths)
+	}
 
 	// Heavy PRs earn nothing. Here counts them at the usual credit and
 	// Burden takes the difference back, so the cost is visible.
@@ -217,8 +225,7 @@ func score(m Metrics, w Weights) Result {
 	}
 
 	elsewhere := []Component{
-		{Label: "Account age", Detail: age(g.AccountAgeDays), Count: months, Points: points(months, w.AccountAge),
-			why: "account " + age(g.AccountAgeDays) + " old"},
+		{Label: "Account age", Detail: ageDetail, Count: months, Points: points(months, w.AccountAge), why: ageWhy},
 		{Label: "PRs merged elsewhere", Detail: acceptedDetail(g), Count: g.AcceptedMergedElsewhere(),
 			Points: points(g.AcceptedMergedElsewhere(), w.MergedElsewhere), why: mergedElsewhereWhy(g)},
 		{Label: "Stars on own projects", Detail: fmt.Sprintf("%d repos with %d+", g.ProjectsStarred, minProjectStars),

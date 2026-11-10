@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -361,6 +363,55 @@ func TestEngagement(t *testing.T) {
 	}
 	if a.Truncated {
 		t.Error("truncated")
+	}
+}
+
+func TestActiveMonths(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		for _, want := range []string{
+			`y2024: contributionsCollection(from: "2024-11-20T00:00:00Z", to: "2024-12-31T23:59:59Z")`,
+			`y2025: contributionsCollection(from: "2025-01-01T00:00:00Z", to: "2025-12-31T23:59:59Z")`,
+			`y2026: contributionsCollection(from: "2026-01-01T00:00:00Z", to: "2026-03-10T00:00:00Z")`,
+		} {
+			if !strings.Contains(query, want) {
+				t.Errorf("query missing %s:\n%s", want, query)
+			}
+		}
+		days := func(ds ...string) string {
+			var parts []string
+			for _, d := range ds {
+				parts = append(parts, fmt.Sprintf(`{"date":%q,"contributionCount":%d}`, d[:10], len(d)-10))
+			}
+			return `{"contributionCalendar":{"weeks":[{"contributionDays":[` + strings.Join(parts, ",") + `]}]}}`
+		}
+		// The count is the number of characters after the date.
+		return `{"data":{"user":{
+			"y2024":` + days("2024-11-17x", "2024-11-21", "2024-12-02xx") + `,
+			"y2025":` + days("2025-02-01x", "2025-02-14x", "2025-06-30x") + `,
+			"y2026":` + days("2026-03-09x", "2026-03-12x") + `}}}`
+	}).client(t)
+	// Active: 2024-12, 2025-02, 2025-06, 2026-03. Not 2024-11: its only
+	// contribution is padding before the account existed.
+	n, err := gh.ActiveMonths("u", time.Date(2024, 11, 20, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
+	if err != nil || n != 4 {
+		t.Errorf("ActiveMonths = %d, %v, want 4", n, err)
+	}
+}
+
+func TestActiveMonthsSplitsYears(t *testing.T) {
+	var calls atomic.Int32
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		calls.Add(1)
+		if n := strings.Count(query, "contributionCalendar"); n > calendarYears {
+			t.Errorf("%d years in one request", n)
+		}
+		return `{"data":{"user":{"years":{"contributionYears":[2020]}}}}`
+	}).client(t)
+	// 2010 to 2026 is 17 years: 5 requests of up to 4. An empty calendar
+	// with years listed is a hidden one, not an idle account.
+	_, err := gh.ActiveMonths("u", time.Date(2010, 5, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC))
+	if calls.Load() != 5 || !errors.Is(err, errCalendarHidden) {
+		t.Errorf("%d requests, err %v", calls.Load(), err)
 	}
 }
 

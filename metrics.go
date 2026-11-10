@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -51,6 +52,12 @@ const (
 type Global struct {
 	AccountCreated time.Time `json:"account_created,omitzero"`
 	AccountAgeDays int       `json:"account_age_days"`
+	// ActiveMonths is calendar months since the account was created with
+	// at least one contribution on its contribution calendar. It's only
+	// meaningful when ActivityChecked is true. Otherwise the score uses
+	// every month of the account's age.
+	ActiveMonths    int  `json:"active_months"`
+	ActivityChecked bool `json:"activity_checked"`
 
 	PRsOpened int `json:"prs_opened"`
 	PRsMerged int `json:"prs_merged"`
@@ -570,12 +577,19 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.items(&m.PRsOpen, &m.OpenPRs, prs+" is:open", "desc", openPRList)
 
 	var (
-		act       activity
-		engageErr error
-		wg        sync.WaitGroup
+		act         activity
+		engageErr   error
+		activityErr error
+		wg          sync.WaitGroup
 	)
 	recentFrom := now.AddDate(0, 0, -recentDays)
 	wg.Go(func() { act, engageErr = src.Engagement(user, recentFrom) })
+	if !acct.CreatedAt.IsZero() {
+		wg.Go(func() {
+			g.ActiveMonths, activityErr = src.ActiveMonths(user, acct.CreatedAt, now)
+			g.ActivityChecked = activityErr == nil
+		})
+	}
 	err := runAll(src, append([]batch{b}, bx.split()...))
 	wg.Wait()
 	if err != nil {
@@ -583,6 +597,12 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	}
 	// Without comments and reviews, the rest of the report is still useful,
 	// so it's reported as missing instead of failing the run.
+	switch {
+	case errors.Is(activityErr, errCalendarHidden):
+		fmt.Fprintln(notices, "The contribution calendar is hidden, so account age counts every month.")
+	case activityErr != nil:
+		fmt.Fprintf(notices, "Couldn't read the contribution calendar, so account age counts every month: %v\n", activityErr)
+	}
 	if engageErr != nil {
 		fmt.Fprintf(notices, "Couldn't check comments and reviews elsewhere: %v\n", engageErr)
 		g.EngagementUnchecked = true

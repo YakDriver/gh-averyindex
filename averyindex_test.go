@@ -48,6 +48,8 @@ type fakeSource struct {
 	comments, reviews         []engaged
 	engagedSince              time.Time
 	engageErr                 error
+	activeMonths              int
+	activityErr               error
 }
 
 func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
@@ -66,6 +68,10 @@ func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
 		results = append(results, searchResult{Total: total, Items: items})
 	}
 	return results, nil
+}
+
+func (f *fakeSource) ActiveMonths(login string, created, now time.Time) (int, error) {
+	return f.activeMonths, f.activityErr
 }
 
 func (f *fakeSource) OwnedRepos(string) ([]ownedRepo, error) {
@@ -1573,6 +1579,51 @@ func TestCollectProjectsLeavesOutScoredRepo(t *testing.T) {
 	}
 	if want := "desc|is:pr is:merged is:public user:u -author:u -repo:u/a"; !slices.Contains(src.queries, want) {
 		t.Errorf("contributor search doesn't leave out the scored repo: %q", src.queries)
+	}
+}
+
+func TestAccountAgeCountsActiveMonths(t *testing.T) {
+	// #31: a 5-year-old account active in 3 months looks like a new one,
+	// not an established one.
+	ageOf := func(g Global) Component {
+		for _, c := range score(Metrics{Global: g}, defaultWeights).Components {
+			if c.Label == "Account age" {
+				return c
+			}
+		}
+		t.Fatal("no account age")
+		return Component{}
+	}
+	idle := ageOf(Global{AccountAgeDays: 1826, ActiveMonths: 3, ActivityChecked: true})
+	busy := ageOf(Global{AccountAgeDays: 1826, ActiveMonths: 60, ActivityChecked: true})
+	unchecked := ageOf(Global{AccountAgeDays: 1826})
+	if idle.Points != 3 || idle.Detail != "5.0 years · 3 active months" || idle.why != "account 5.0 years old, active 3 months" {
+		t.Errorf("idle: %+v", idle)
+	}
+	if math.Abs(busy.Points-unchecked.Points) > 0.01 {
+		t.Errorf("busy %.1f, unchecked %.1f: an account active every month should count in full", busy.Points, unchecked.Points)
+	}
+}
+
+func TestCollectActiveMonths(t *testing.T) {
+	created := testNow.AddDate(-5, 0, 0)
+	src := &fakeSource{activeMonths: 7}
+	m, err := collect(src, "o/r", account{Login: "u", CreatedAt: created}, testNow)
+	if err != nil || !m.Global.ActivityChecked || m.Global.ActiveMonths != 7 {
+		t.Errorf("checked %v, active %d, err %v", m.Global.ActivityChecked, m.Global.ActiveMonths, err)
+	}
+
+	// A failed calendar read falls back to every month, with a notice.
+	var buf bytes.Buffer
+	old := notices
+	notices = &buf
+	t.Cleanup(func() { notices = old })
+	src = &fakeSource{activityErr: errors.New("timeout")}
+	if m, err = collect(src, "o/r", account{Login: "u", CreatedAt: created}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if m.Global.ActivityChecked || !strings.Contains(buf.String(), "contribution calendar") {
+		t.Errorf("checked %v, notice %q", m.Global.ActivityChecked, buf.String())
 	}
 }
 
