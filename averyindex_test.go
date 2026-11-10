@@ -36,7 +36,7 @@ type fakeSource struct {
 	mergedQuery string
 	thumbs      int
 	truncated   bool
-	stars       []int
+	stars       []ownedRepo
 	err         error
 
 	thumbsQuery, thumbsAuthor string
@@ -68,7 +68,7 @@ func (f *fakeSource) SearchMany(reqs []searchReq) ([]searchResult, error) {
 	return results, nil
 }
 
-func (f *fakeSource) OwnedRepoStars(string) ([]int, error) {
+func (f *fakeSource) OwnedRepos(string) ([]ownedRepo, error) {
 	return f.stars, f.err
 }
 
@@ -218,9 +218,9 @@ func TestCollectGlobalScope(t *testing.T) {
 }
 
 func TestCollectProjects(t *testing.T) {
-	const q = "desc|is:pr is:merged is:public user:u -author:u"
+	const q = "desc|is:pr is:merged is:public user:u -author:u -repo:o/r"
 	src := &fakeSource{
-		stars: []int{34, 26, 3, 2, 1, 0},
+		stars: []ownedRepo{{"u/a", 34}, {"u/b", 26}, {"u/c", 3}, {"u/d", 2}, {"u/e", 1}, {"u/f", 0}},
 		search: map[string]fakeSearch{
 			q: {total: 150, items: []searchItem{
 				{Author: "alice"}, {Author: "Alice"}, {Author: "bob"},
@@ -1543,6 +1543,36 @@ func TestNotLandingAndAuthoringSplitPRs(t *testing.T) {
 				t.Errorf("authoring counts %v PRs, want the 76 open", c.Count)
 			}
 		}
+	}
+}
+
+func TestScoreTruncatedEngagementSaysSo(t *testing.T) {
+	// Copilot on #30: a lower bound on engagement reads as one.
+	g := Global{AccountAgeDays: 1000, RecentPRs: 40, RecentReviews: 2, EngagementTruncated: true}
+	r := score(Metrics{Global: g}, defaultWeights)
+	if r.Reason != "40 PRs elsewhere in 30 days still open, at least 2 issues, comments, and reviews" {
+		t.Errorf("reason = %q", r.Reason)
+	}
+	for _, c := range r.Components {
+		if c.Label == "Authoring without engagement elsewhere" && (c.Points >= 0 || !strings.Contains(c.Detail, "at least 2 given")) {
+			t.Errorf("%+v", c)
+		}
+	}
+}
+
+func TestCollectProjectsLeavesOutScoredRepo(t *testing.T) {
+	// Copilot on #30: scoring u/a, which u owns, doesn't earn Elsewhere
+	// points from u/a.
+	src := &fakeSource{stars: []ownedRepo{{"u/a", 500}, {"u/b", 10}}}
+	m, err := collect(src, "u/a", account{Login: "u"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Global.ProjectStars != 10 || m.Global.ProjectsStarred != 1 {
+		t.Errorf("stars %d on %d repos, want 10 on 1", m.Global.ProjectStars, m.Global.ProjectsStarred)
+	}
+	if want := "desc|is:pr is:merged is:public user:u -author:u -repo:u/a"; !slices.Contains(src.queries, want) {
+		t.Errorf("contributor search doesn't leave out the scored repo: %q", src.queries)
 	}
 }
 

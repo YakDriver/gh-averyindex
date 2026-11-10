@@ -551,7 +551,7 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	var contributorTotal int
 	var contributorItems []searchItem
 	b.items(&contributorTotal, &contributorItems,
-		fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", user, user), "desc", contributorSample)
+		fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s -repo:%s", user, user, repo), "desc", contributorSample)
 
 	// This repo.
 	base := "repo:" + repo
@@ -607,7 +607,7 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	countRecentRepos(recentFirst.Items, g)
 	g.SpraySampled, g.SprayRepos = len(sprayed.Items), sprayRepos(sprayed.Items)
 	g.AcceptedSampled, g.AcceptedElsewhere = len(merged.Items), acceptedByOthers(user, merged.Items)
-	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
+	if err := collectProjects(src, user, repo, contributorTotal, contributorItems, g); err != nil {
 		return m, err
 	}
 
@@ -695,14 +695,17 @@ func countRecentRepos(items []searchItem, g *Global) {
 }
 
 // collectProjects scores what other people do with the user's own repos.
-func collectProjects(src source, login string, contributorTotal int, contributorItems []searchItem, g *Global) error {
-	stars, err := src.OwnedRepoStars(login)
+//
+// The scored repo is left out, even when the user owns it, because
+// Elsewhere is about other repos (Copilot on #30).
+func collectProjects(src source, login, repo string, contributorTotal int, contributorItems []searchItem, g *Global) error {
+	repos, err := src.OwnedRepos(login)
 	if err != nil {
 		return err
 	}
-	for _, n := range stars {
-		if n >= minProjectStars {
-			g.ProjectStars += n
+	for _, r := range repos {
+		if r.StargazerCount >= minProjectStars && !strings.EqualFold(r.NameWithOwner, repo) {
+			g.ProjectStars += r.StargazerCount
 			g.ProjectsStarred++
 		}
 	}

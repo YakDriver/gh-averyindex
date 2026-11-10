@@ -246,12 +246,17 @@ func score(m Metrics, w Weights) Result {
 	gave := g.RecentGave()
 	open := g.RecentOpen()
 	authoringElsewhere := authoringPoints(open, 0, gave, float64(open)/(recentDays/daysPerMonth), 1, w)
-	gaveDetail := thousands(gave) + " given"
+	// When engagement couldn't be read, there's no cost: missing isn't
+	// none. When there was more than was read, the cost still uses the count
+	// read, and the text says it's a lower bound. Skipping the cost there
+	// would excuse a self-merge farm whose comments are mostly in its own
+	// repos: S3 would go from -12 to 24.
+	gaveDetail, gaveWhy := thousands(gave)+" given", engagement(gave)
 	switch {
 	case g.EngagementUnchecked:
 		authoringElsewhere, gaveDetail = 0, "comments and reviews unchecked"
 	case g.EngagementTruncated:
-		gaveDetail = "at least " + gaveDetail
+		gaveDetail, gaveWhy = "at least "+gaveDetail, "at least "+gaveWhy
 	}
 	elsewhere = append(elsewhere,
 		Component{
@@ -276,7 +281,7 @@ func score(m Metrics, w Weights) Result {
 			Count:  float64(open),
 			Points: authoringElsewhere,
 			why: fmt.Sprintf("%s elsewhere in %d days still open, %s", plural(open, "PR"),
-				recentDays, engagement(gave)),
+				recentDays, gaveWhy),
 		},
 	)
 

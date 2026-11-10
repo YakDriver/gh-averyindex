@@ -75,9 +75,9 @@ type source interface {
 	// Engagement returns the user's issue and PR comments and PR reviews
 	// since since, with where and when each happened.
 	Engagement(login string, since time.Time) (activity, error)
-	// OwnedRepoStars returns the star counts of the user's public, non-fork
-	// repositories, at most the 100 most starred.
-	OwnedRepoStars(login string) ([]int, error)
+	// OwnedRepos returns the user's public, non-fork repositories with
+	// their star counts, at most the 100 most starred.
+	OwnedRepos(login string) ([]ownedRepo, error)
 	// ThumbsUp sums 👍 reactions on the issues and PRs matching query, not
 	// counting reactions by author.
 	// GitHub search returns at most 1,000 results, so truncated reports
@@ -794,16 +794,22 @@ query($login: String!) {
   user(login: $login) {
     repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100,
                  orderBy: {field: STARGAZERS, direction: DESC}) {
-      nodes { stargazerCount }
+      nodes { nameWithOwner stargazerCount }
     }
   }
 }`
 
-func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
+// ownedRepo is one of the user's own public repositories.
+type ownedRepo struct {
+	NameWithOwner  string
+	StargazerCount int
+}
+
+func (g *gitHub) OwnedRepos(login string) ([]ownedRepo, error) {
 	var resp struct {
 		User *struct {
 			Repositories struct {
-				Nodes []struct{ StargazerCount int }
+				Nodes []ownedRepo
 			}
 		}
 	}
@@ -813,11 +819,7 @@ func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
 	if resp.User == nil {
 		return nil, nil
 	}
-	stars := make([]int, 0, len(resp.User.Repositories.Nodes))
-	for _, n := range resp.User.Repositories.Nodes {
-		stars = append(stars, n.StargazerCount)
-	}
-	return stars, nil
+	return resp.User.Repositories.Nodes, nil
 }
 
 // reactionSample is how many 👍 reactions per item are checked for the
