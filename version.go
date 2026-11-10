@@ -22,7 +22,17 @@ var version = ""
 //	   heavy_prs, heavy_unchecked, and spray_repos, spray_sampled,
 //	   accepted_elsewhere, and accepted_sampled in global. recent_repos now
 //	   comes from the newest 100 recent PRs, without paging for more.
-const schemaVersion = 3
+//	4: three scores (here, elsewhere, burden) that sum to averyindex, and
+//	   a reason. tier and flags are gone. Components use count and points.
+//	   global leaves out the scored repo. Not-landing and spray moved to
+//	   Elsewhere. Burden is heavy maintainer involvement and authoring
+//	   without engagement, and PRs closed unmerged no longer cost on their
+//	   own. merged_elsewhere is gone (use global.prs_merged). New:
+//	   active_days and recent_prs, and in global, recent_issues,
+//	   recent_threads, recent_reviews, engagement_truncated, and
+//	   engagement_unchecked. The "Code credit" component is now "Merged
+//	   PRs".
+const schemaVersion = 4
 
 // buildInfo is the version and, when known, the commit and its date.
 type buildInfo struct {

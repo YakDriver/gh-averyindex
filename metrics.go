@@ -16,6 +16,8 @@ const (
 	openPRList = 5
 	// recentDays is the window for recent PR activity across GitHub.
 	recentDays = 30
+	// recentHereDays is the window for the user's recent rate of PRs here.
+	recentHereDays = 30
 	// recentSample is how many recent PRs are examined to count repos.
 	recentSample = 100
 	// minProjectStars is the fewest stars a user's own repo needs before its
@@ -42,8 +44,8 @@ const (
 	heavyMinCommits = 10
 )
 
-// Global is the user's PR activity across GitHub. It covers public
-// repositories the user doesn't own: anyone can open and merge PRs in their
+// Global is the user's activity across GitHub. It covers public repositories
+// the user doesn't own, other than the one being scored: anyone can open and merge PRs in their
 // own repos, and private repos would make the result depend on who runs the
 // tool.
 type Global struct {
@@ -53,10 +55,6 @@ type Global struct {
 	PRsOpened int `json:"prs_opened"`
 	PRsMerged int `json:"prs_merged"`
 	PRsOpen   int `json:"prs_open"`
-
-	// MergedElsewhere is PRs merged in those repositories, excluding the one
-	// being scored.
-	MergedElsewhere int `json:"merged_elsewhere"`
 
 	// Projects maintained: what other people did with the user's own public
 	// repositories. Self-merged PRs in those repos aren't counted because
@@ -79,6 +77,19 @@ type Global struct {
 	RecentTopRepo  string `json:"recent_top_repo,omitempty"`
 	RecentTopCount int    `json:"recent_top_count,omitempty"`
 	RecentSampled  int    `json:"recent_sampled"`
+
+	// RecentIssues, RecentThreads, and RecentReviews are how much the user
+	// engaged with other people's work in the same window: issues opened,
+	// other people's threads commented on, and other people's PRs reviewed.
+	// A thread the user both commented on and reviewed counts once, as a
+	// review. EngagementTruncated means there were more comments or reviews
+	// than were read, so the counts are lower bounds. EngagementUnchecked
+	// means they couldn't be read at all.
+	RecentIssues        int  `json:"recent_issues"`
+	RecentThreads       int  `json:"recent_threads"`
+	RecentReviews       int  `json:"recent_reviews"`
+	EngagementTruncated bool `json:"engagement_truncated,omitempty"`
+	EngagementUnchecked bool `json:"engagement_unchecked,omitempty"`
 
 	// SprayRepos is how many repos, among the newest SpraySampled PRs opened
 	// 31 to 180 days ago, got a PR that was closed unmerged and none that
@@ -105,7 +116,7 @@ func (g Global) AcceptedShare() float64 {
 // AcceptedMergedElsewhere is PRs merged elsewhere, weighted by the share
 // that others accepted.
 func (g Global) AcceptedMergedElsewhere() float64 {
-	return float64(g.MergedElsewhere) * g.AcceptedShare()
+	return float64(g.PRsMerged) * g.AcceptedShare()
 }
 
 // ClosedUnmerged is PRs closed without merging, anywhere.
@@ -202,8 +213,12 @@ type Metrics struct {
 
 	// FirstAuthored and LastAuthored are the user's oldest and newest issue
 	// or PR. Nil if they've never opened one.
+	// RecentPRs is PRs opened here in the last recentHereDays days.
+	RecentPRs     int         `json:"recent_prs"`
 	FirstAuthored *searchItem `json:"first_authored,omitempty"`
 	LastAuthored  *searchItem `json:"last_authored,omitempty"`
+	// ActiveDays is how long since the user's first issue or PR here.
+	ActiveDays int `json:"active_days"`
 
 	RecentMerged []MergedPR `json:"recent_merged,omitempty"`
 	HeavyPRs     []HeavyPR  `json:"heavy_prs,omitempty"`
@@ -227,11 +242,21 @@ func (m Metrics) Participation() int {
 	return m.Issues + m.Threads + m.Reviews
 }
 
-// DriveBy reports whether the user has opened PRs here, none were merged, and
-// they've done nothing else here. Someone with merged PRs has already been
-// through review, so they aren't flagged.
-func (m Metrics) DriveBy() bool {
-	return m.PRsOpened > 0 && m.PRsMerged == 0 && m.Participation() == 0
+// RecentOpen is PRs elsewhere from the last recentDays days that are still
+// open.
+func (g Global) RecentOpen() int {
+	return max(0, g.RecentPRs-g.RecentMerged-g.RecentClosedUnmerged)
+}
+
+// RecentResolved is PRs elsewhere from the last recentDays days that merged
+// or closed.
+func (g Global) RecentResolved() int {
+	return g.RecentMerged + g.RecentClosedUnmerged
+}
+
+// RecentGave is the user's recent engagement elsewhere.
+func (g Global) RecentGave() int {
+	return g.RecentIssues + g.RecentThreads + g.RecentReviews
 }
 
 // AvgCredit is the average credit across the recent merged PRs checked for
@@ -492,12 +517,14 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	// Every search goes out in one request.
 	var b batch
 
-	// Across GitHub: public repos the user doesn't own.
-	global := fmt.Sprintf("is:pr author:%s %s", user, globalScope(user))
+	// Elsewhere: public repos the user doesn't own, other than this one.
+	// Work here is scored by Here and Burden, so leaving it out keeps it
+	// from counting twice (Copilot on #30).
+	away := fmt.Sprintf("%s -repo:%s", globalScope(user), repo)
+	global := fmt.Sprintf("is:pr author:%s %s", user, away)
 	b.count(&g.PRsOpened, global)
 	b.count(&g.PRsMerged, global+" is:merged")
 	b.count(&g.PRsOpen, global+" is:open")
-	b.count(&g.MergedElsewhere, global+" is:merged -repo:"+repo)
 
 	since := now.AddDate(0, 0, -recentDays).Format(time.DateOnly)
 	recent := global + " created:>=" + since
@@ -505,6 +532,10 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.result(&recentFirst, recent, "desc", recentSample)
 	b.count(&g.RecentMerged, recent+" is:merged")
 	b.count(&g.RecentClosedUnmerged, recent+" is:closed is:unmerged")
+
+	// What the user gave other repos in the same window. Comments and
+	// reviews come from Engagement, below, which has their timestamps.
+	b.count(&g.RecentIssues, fmt.Sprintf("is:issue author:%s %s created:>=%s", user, away, since))
 
 	// The searches with extras are sent separately, alongside the main
 	// batch. Together, GitHub can time out or exceed its resource limits on
@@ -515,18 +546,19 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	var sprayed searchResult
 	bx.extra(&sprayed, extraState, global+" created:"+sprayFrom+".."+sprayTo, spraySample)
 	var merged searchResult
-	bx.extra(&merged, extraAccepted, global+" is:merged -repo:"+repo, acceptedSample)
+	bx.extra(&merged, extraAccepted, global+" is:merged", acceptedSample)
 
 	var contributorTotal int
 	var contributorItems []searchItem
 	b.items(&contributorTotal, &contributorItems,
-		fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s", user, user), "desc", contributorSample)
+		fmt.Sprintf("is:pr is:merged is:public user:%s -author:%s -repo:%s", user, user, repo), "desc", contributorSample)
 
 	// This repo.
 	base := "repo:" + repo
 	prs := fmt.Sprintf("%s is:pr author:%s", base, user)
 	authored := fmt.Sprintf("%s author:%s", base, user)
 	b.count(&m.PRsOpened, prs)
+	b.count(&m.RecentPRs, prs+" created:>="+now.AddDate(0, 0, -recentHereDays).Format(time.DateOnly))
 	b.count(&m.Issues, fmt.Sprintf("%s is:issue author:%s", base, user))
 	// PRs the user reviewed count under Reviews, so they're left out here to
 	// avoid counting the same work twice.
@@ -537,11 +569,35 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	b.items(nil, &last, authored, "desc", 1)
 	b.items(&m.PRsOpen, &m.OpenPRs, prs+" is:open", "desc", openPRList)
 
-	if err := runAll(src, append([]batch{b}, bx.split()...)); err != nil {
+	var (
+		act       activity
+		engageErr error
+		wg        sync.WaitGroup
+	)
+	recentFrom := now.AddDate(0, 0, -recentDays)
+	wg.Go(func() { act, engageErr = src.Engagement(user, recentFrom) })
+	err := runAll(src, append([]batch{b}, bx.split()...))
+	wg.Wait()
+	if err != nil {
 		return m, err
 	}
+	// Without comments and reviews, the rest of the report is still useful,
+	// so it's reported as missing instead of failing the run.
+	if engageErr != nil {
+		fmt.Fprintf(notices, "Couldn't check comments and reviews elsewhere: %v\n", engageErr)
+		g.EngagementUnchecked = true
+	}
+	reviewedElsewhere := engagedSet(user, repo, recentFrom, act.Reviews)
+	g.RecentReviews = len(reviewedElsewhere)
+	for k := range engagedSet(user, repo, recentFrom, act.Comments) {
+		if !reviewedElsewhere[k] {
+			g.RecentThreads++
+		}
+	}
+	g.EngagementTruncated = act.Truncated
 	if len(first) > 0 {
 		m.FirstAuthored = &first[0]
+		m.ActiveDays = int(now.Sub(first[0].CreatedAt).Hours() / 24)
 	}
 	if len(last) > 0 {
 		m.LastAuthored = &last[0]
@@ -551,11 +607,10 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	countRecentRepos(recentFirst.Items, g)
 	g.SpraySampled, g.SprayRepos = len(sprayed.Items), sprayRepos(sprayed.Items)
 	g.AcceptedSampled, g.AcceptedElsewhere = len(merged.Items), acceptedByOthers(user, merged.Items)
-	if err := collectProjects(src, user, contributorTotal, contributorItems, g); err != nil {
+	if err := collectProjects(src, user, repo, contributorTotal, contributorItems, g); err != nil {
 		return m, err
 	}
 
-	var err error
 	if m.ThumbsUp, m.ThumbsUpTruncated, err = src.ThumbsUp(authored, user); err != nil {
 		return m, err
 	}
@@ -570,11 +625,11 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 		raw       []rawPR
 		reviewed  []rawPR
 		reviewErr error
-		wg        sync.WaitGroup
+		heavyWG   sync.WaitGroup
 	)
-	wg.Go(func() { reviewed, reviewErr = src.ReviewedPRs(repo, prs+" is:merged", heavyMinThreads) })
+	heavyWG.Go(func() { reviewed, reviewErr = src.ReviewedPRs(repo, prs+" is:merged", heavyMinThreads) })
 	total, raw, err = src.MergedPRs(repo, prs+" is:merged", recentMergedSample)
-	wg.Wait()
+	heavyWG.Wait()
 	if err != nil {
 		return m, err
 	}
@@ -608,6 +663,21 @@ func collect(src source, repo string, acct account, now time.Time) (Metrics, err
 	return m, nil
 }
 
+// engagedSet is the distinct issues and PRs elsewhere that the user engaged
+// with since from: public, not in a repo they own or the one being scored,
+// and someone else's.
+func engagedSet(user, repo string, from time.Time, items []engaged) map[string]bool {
+	seen := map[string]bool{}
+	for _, e := range items {
+		if e.At.Before(from) || e.Private || strings.EqualFold(e.Owner, user) || strings.EqualFold(e.Repo, repo) ||
+			strings.EqualFold(e.Author, user) {
+			continue
+		}
+		seen[fmt.Sprintf("%s#%d", e.Repo, e.Number)] = true
+	}
+	return seen
+}
+
 // countRecentRepos counts the repos the user's newest recent PRs went to.
 func countRecentRepos(items []searchItem, g *Global) {
 	perRepo := map[string]int{}
@@ -625,14 +695,17 @@ func countRecentRepos(items []searchItem, g *Global) {
 }
 
 // collectProjects scores what other people do with the user's own repos.
-func collectProjects(src source, login string, contributorTotal int, contributorItems []searchItem, g *Global) error {
-	stars, err := src.OwnedRepoStars(login)
+//
+// The scored repo is left out, even when the user owns it, because
+// Elsewhere is about other repos (Copilot on #30).
+func collectProjects(src source, login, repo string, contributorTotal int, contributorItems []searchItem, g *Global) error {
+	repos, err := src.OwnedRepos(login)
 	if err != nil {
 		return err
 	}
-	for _, n := range stars {
-		if n >= minProjectStars {
-			g.ProjectStars += n
+	for _, r := range repos {
+		if r.StargazerCount >= minProjectStars && !strings.EqualFold(r.NameWithOwner, repo) {
+			g.ProjectStars += r.StargazerCount
 			g.ProjectsStarred++
 		}
 	}

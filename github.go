@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
@@ -70,9 +72,12 @@ type source interface {
 	// matching query and returns those with at least minThreads review
 	// threads, with commits.
 	ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error)
-	// OwnedRepoStars returns the star counts of the user's public, non-fork
-	// repositories, at most the 100 most starred.
-	OwnedRepoStars(login string) ([]int, error)
+	// Engagement returns the user's issue and PR comments and PR reviews
+	// since since, with where and when each happened.
+	Engagement(login string, since time.Time) (activity, error)
+	// OwnedRepos returns the user's public, non-fork repositories with
+	// their star counts, at most the 100 most starred.
+	OwnedRepos(login string) ([]ownedRepo, error)
 	// ThumbsUp sums 👍 reactions on the issues and PRs matching query, not
 	// counting reactions by author.
 	// GitHub search returns at most 1,000 results, so truncated reports
@@ -621,21 +626,190 @@ func (g *gitHub) ReviewedPRs(repo, query string, minThreads int) ([]rawPR, error
 	return prs, err
 }
 
+// activity is the user's recent comments and reviews. Truncated means there
+// were more than Engagement reads, so counts from it are lower bounds.
+type activity struct {
+	Comments, Reviews []engaged
+	Truncated         bool
+}
+
+// engaged is one comment or review by the user on someone's issue or PR.
+type engaged struct {
+	Repo    string // owner/name
+	Owner   string
+	Private bool
+	Number  int
+	Author  string // the issue or PR's author
+	At      time.Time
+}
+
+// engagementPages is how many pages of 100 comments, and of 100 reviews,
+// Engagement reads before it stops and reports the count as a lower bound.
+const engagementPages = 5
+
+const commentsQuery = `
+query($login: String!, $before: String) {
+  user(login: $login) {
+    issueComments(last: 100, before: $before) {
+      pageInfo { hasPreviousPage startCursor }
+      nodes { createdAt repository { nameWithOwner isPrivate owner { login } } issue { number author { login } } }
+    }
+  }
+}`
+
+const reviewsQuery = `
+query($login: String!, $from: DateTime!, $after: String) {
+  user(login: $login) {
+    contributionsCollection(from: $from) {
+      pullRequestReviewContributions(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { occurredAt repository { nameWithOwner isPrivate owner { login } } pullRequest { number author { login } } }
+      }
+    }
+  }
+}`
+
+type engagedRepo struct {
+	NameWithOwner string
+	IsPrivate     bool
+	Owner         struct{ Login string }
+}
+
+type engagedItem struct {
+	Number int
+	Author *struct{ Login string }
+}
+
+func (r engagedRepo) engaged(it engagedItem, at time.Time) engaged {
+	e := engaged{Repo: r.NameWithOwner, Owner: r.Owner.Login, Private: r.IsPrivate, Number: it.Number, At: at}
+	if it.Author != nil {
+		e.Author = it.Author.Login
+	}
+	return e
+}
+
+type pageInfo struct {
+	HasPreviousPage, HasNextPage bool
+	StartCursor, EndCursor       string
+}
+
+// Engagement uses timestamps on the comments and reviews themselves.
+// Searching for threads updated recently would credit old comments on
+// threads someone else touched since (Copilot on #30). It pages back through
+// the window, because the user's newest comments may all be in a repo that
+// doesn't count, such as the one being scored (Copilot on #30). Comments and
+// reviews are read at the same time.
+func (g *gitHub) Engagement(login string, since time.Time) (activity, error) {
+	var (
+		a                       activity
+		commentErr, reviewErr   error
+		commentsCut, reviewsCut bool
+		wg                      sync.WaitGroup
+	)
+	wg.Go(func() { a.Comments, commentsCut, commentErr = g.comments(login, since) })
+	a.Reviews, reviewsCut, reviewErr = g.reviews(login, since)
+	wg.Wait()
+	if err := cmp.Or(commentErr, reviewErr); err != nil {
+		return activity{}, fmt.Errorf("comments and reviews by %s: %w", login, err)
+	}
+	a.Truncated = commentsCut || reviewsCut
+	return a, nil
+}
+
+// comments returns the user's comments since since, newest page first. cut
+// is true if there were more than engagementPages pages.
+func (g *gitHub) comments(login string, since time.Time) (out []engaged, cut bool, err error) {
+	vars := map[string]any{"login": login, "before": nil}
+	for range engagementPages {
+		var resp struct {
+			User *struct {
+				IssueComments struct {
+					PageInfo pageInfo
+					Nodes    []struct {
+						CreatedAt  time.Time
+						Repository engagedRepo
+						Issue      engagedItem
+					}
+				}
+			}
+		}
+		if err := g.gqlDo(commentsQuery, vars, &resp); err != nil {
+			return nil, false, err
+		}
+		if resp.User == nil {
+			return out, false, nil
+		}
+		c := resp.User.IssueComments
+		for _, n := range c.Nodes {
+			out = append(out, n.Repository.engaged(n.Issue, n.CreatedAt))
+		}
+		// Nodes run oldest to newest, so the first is the oldest on the page.
+		if !c.PageInfo.HasPreviousPage || len(c.Nodes) == 0 || c.Nodes[0].CreatedAt.Before(since) {
+			return out, false, nil
+		}
+		vars["before"] = c.PageInfo.StartCursor
+	}
+	return out, true, nil
+}
+
+// reviews returns the PR reviews the user made since since. cut is true if
+// there were more than engagementPages pages.
+func (g *gitHub) reviews(login string, since time.Time) (out []engaged, cut bool, err error) {
+	vars := map[string]any{"login": login, "from": since.UTC().Format(time.RFC3339), "after": nil}
+	for range engagementPages {
+		var resp struct {
+			User *struct {
+				ContributionsCollection struct {
+					PullRequestReviewContributions struct {
+						PageInfo pageInfo
+						Nodes    []struct {
+							OccurredAt  time.Time
+							Repository  engagedRepo
+							PullRequest engagedItem
+						}
+					}
+				}
+			}
+		}
+		if err := g.gqlDo(reviewsQuery, vars, &resp); err != nil {
+			return nil, false, err
+		}
+		if resp.User == nil {
+			return out, false, nil
+		}
+		r := resp.User.ContributionsCollection.PullRequestReviewContributions
+		for _, n := range r.Nodes {
+			out = append(out, n.Repository.engaged(n.PullRequest, n.OccurredAt))
+		}
+		if !r.PageInfo.HasNextPage {
+			return out, false, nil
+		}
+		vars["after"] = r.PageInfo.EndCursor
+	}
+	return out, true, nil
+}
+
 const ownedReposQuery = `
 query($login: String!) {
   user(login: $login) {
     repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100,
                  orderBy: {field: STARGAZERS, direction: DESC}) {
-      nodes { stargazerCount }
+      nodes { nameWithOwner stargazerCount }
     }
   }
 }`
 
-func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
+// ownedRepo is one of the user's own public repositories.
+type ownedRepo struct {
+	NameWithOwner  string
+	StargazerCount int
+}
+
+func (g *gitHub) OwnedRepos(login string) ([]ownedRepo, error) {
 	var resp struct {
 		User *struct {
 			Repositories struct {
-				Nodes []struct{ StargazerCount int }
+				Nodes []ownedRepo
 			}
 		}
 	}
@@ -645,11 +819,7 @@ func (g *gitHub) OwnedRepoStars(login string) ([]int, error) {
 	if resp.User == nil {
 		return nil, nil
 	}
-	stars := make([]int, 0, len(resp.User.Repositories.Nodes))
-	for _, n := range resp.User.Repositories.Nodes {
-		stars = append(stars, n.StargazerCount)
-	}
-	return stars, nil
+	return resp.User.Repositories.Nodes, nil
 }
 
 // reactionSample is how many 👍 reactions per item are checked for the

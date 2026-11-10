@@ -4,7 +4,7 @@
 //
 // Usage:
 //
-//	gh averyindex [-R owner/repo] [--json] <user>
+//	gh averyindex [-R owner/repo] [--explain | --json] <user>
 //
 // Without -R, the repository is resolved from the current directory the same
 // way gh does it.
@@ -31,15 +31,16 @@ func main() {
 type options struct {
 	repo    string
 	json    bool
+	explain bool
 	version bool
 	user    string
 	// number is a PR or issue whose author is scored, from --pr or a URL.
 	number int
 }
 
-const usage = `Usage: gh averyindex [-R owner/repo] [--json] <user>
-       gh averyindex [-R owner/repo] [--json] --pr <number>
-       gh averyindex [--json] <pull request or issue URL>
+const usage = `Usage: gh averyindex [-R owner/repo] [--explain | --json] <user>
+       gh averyindex [-R owner/repo] [--explain | --json] --pr <number>
+       gh averyindex [--explain | --json] <pull request or issue URL>
        gh averyindex --version
 
 Summarize how helpful a GitHub user has been in a repository.
@@ -47,7 +48,8 @@ Summarize how helpful a GitHub user has been in a repository.
 Flags:
   -R, --repo owner/repo   Repository to score against (default: current repo)
       --pr number         Score the author of this pull request or issue
-      --json              Print JSON instead of a table
+      --explain           Print the full report behind the score
+      --json              Print JSON instead of a summary
       --version           Print the version and exit
 `
 
@@ -66,6 +68,7 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.repo, "R", "", "")
 	fs.StringVar(&opts.repo, "repo", "", "")
 	fs.BoolVar(&opts.json, "json", false, "")
+	fs.BoolVar(&opts.explain, "explain", false, "")
 	fs.BoolVar(&opts.version, "version", false, "")
 	var pr string
 	fs.StringVar(&pr, "pr", "", "")
@@ -84,6 +87,10 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 
 	if opts.version && len(positional) == 0 {
 		return opts, nil
+	}
+	if opts.json && opts.explain {
+		fs.Usage()
+		return opts, errors.New("--explain and --json can't be used together; --json already has everything")
 	}
 	if pr != "" {
 		n, err := parseNumber(pr)
@@ -219,10 +226,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if f, ok := stdout.(*os.File); ok && isTerminal(f) && colorEnabled() {
 		md.Color = true
 	}
-	if opts.json {
+	switch {
+	case opts.json:
 		err = renderJSON(stdout, m, result, md)
-	} else {
+	case opts.explain:
 		err = renderText(stdout, m, result, md)
+	default:
+		err = renderSummary(stdout, m, result, md)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)

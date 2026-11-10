@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -299,6 +301,83 @@ func TestReviewedPRsNoneLong(t *testing.T) {
 	prs, err := gh.ReviewedPRs("o/r", "q", 20)
 	if err != nil || len(prs) != 0 || calls != 1 {
 		t.Errorf("prs %+v, err %v, calls %d", prs, err, calls)
+	}
+}
+
+func TestEngagement(t *testing.T) {
+	since := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	var commentPages, reviewPages atomic.Int32
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		if vars["login"] != "u" {
+			t.Errorf("vars = %v", vars)
+		}
+		switch {
+		case strings.Contains(query, "issueComments(last: 100, before: $before)"):
+			// Copilot on #30: page back until the window starts, so
+			// comments that don't count can't crowd out ones that do.
+			switch commentPages.Add(1) {
+			case 1:
+				if vars["before"] != nil {
+					t.Errorf("first page before = %v", vars["before"])
+				}
+				return `{"data":{"user":{"issueComments":{"pageInfo":{"hasPreviousPage":true,"startCursor":"c1"},"nodes":[
+					{"createdAt":"2026-10-20T00:00:00Z","repository":{"nameWithOwner":"a/b","isPrivate":false,"owner":{"login":"a"}},"issue":{"number":3,"author":{"login":"x"}}}]}}}}`
+			case 2:
+				if vars["before"] != "c1" {
+					t.Errorf("second page before = %v", vars["before"])
+				}
+				return `{"data":{"user":{"issueComments":{"pageInfo":{"hasPreviousPage":true,"startCursor":"c2"},"nodes":[
+					{"createdAt":"2026-09-01T00:00:00Z","repository":{"nameWithOwner":"a/b","isPrivate":false,"owner":{"login":"a"}},"issue":{"number":2,"author":{"login":"x"}}},
+					{"createdAt":"2026-10-01T00:00:00Z","repository":{"nameWithOwner":"a/b","isPrivate":false,"owner":{"login":"a"}},"issue":{"number":1,"author":{"login":"x"}}}]}}}}`
+			}
+			t.Error("read comments from before the window")
+			return `{"data":{"user":null}}`
+		case strings.Contains(query, "pullRequestReviewContributions(first: 100, after: $after)"):
+			if vars["from"] != "2026-09-29T12:00:00Z" {
+				t.Errorf("from = %v", vars["from"])
+			}
+			if reviewPages.Add(1) == 1 {
+				return `{"data":{"user":{"contributionsCollection":{"pullRequestReviewContributions":{"pageInfo":{"hasNextPage":true,"endCursor":"r1"},"nodes":[
+					{"occurredAt":"2026-10-21T00:00:00Z","repository":{"nameWithOwner":"c/d","isPrivate":true,"owner":{"login":"c"}},"pullRequest":{"number":4,"author":null}}]}}}}}`
+			}
+			if vars["after"] != "r1" {
+				t.Errorf("second page after = %v", vars["after"])
+			}
+			return `{"data":{"user":{"contributionsCollection":{"pullRequestReviewContributions":{"pageInfo":{"hasNextPage":false},"nodes":[
+				{"occurredAt":"2026-10-22T00:00:00Z","repository":{"nameWithOwner":"e/f","isPrivate":false,"owner":{"login":"e"}},"pullRequest":{"number":5,"author":{"login":"y"}}}]}}}}}`
+		}
+		t.Errorf("query:\n%s", query)
+		return `{}`
+	}).client(t)
+	a, err := gh.Engagement("u", since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Comments) != 3 || a.Comments[0] != (engaged{Repo: "a/b", Owner: "a", Number: 3, Author: "x", At: day("2026-10-20")}) {
+		t.Errorf("comments = %+v", a.Comments)
+	}
+	if len(a.Reviews) != 2 || !a.Reviews[0].Private || a.Reviews[0].Author != "" || a.Reviews[1].Number != 5 {
+		t.Errorf("reviews = %+v", a.Reviews)
+	}
+	if a.Truncated {
+		t.Error("truncated")
+	}
+}
+
+func TestEngagementStopsAtPageLimit(t *testing.T) {
+	gh := graphQLFunc(func(t *testing.T, query string, vars map[string]any) string {
+		if strings.Contains(query, "issueComments") {
+			return `{"data":{"user":{"issueComments":{"pageInfo":{"hasPreviousPage":true,"startCursor":"c"},"nodes":[
+				{"createdAt":"2026-10-20T00:00:00Z","repository":{"nameWithOwner":"a/b","owner":{"login":"a"}},"issue":{"number":1}}]}}}}`
+		}
+		return `{"data":{"user":{"contributionsCollection":{"pullRequestReviewContributions":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}`
+	}).client(t)
+	a, err := gh.Engagement("u", time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Truncated || len(a.Comments) != engagementPages {
+		t.Errorf("truncated %v, %d comments", a.Truncated, len(a.Comments))
 	}
 }
 
