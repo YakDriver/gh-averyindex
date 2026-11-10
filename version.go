@@ -87,4 +87,7 @@ type meta struct {
 	// Color highlights the score in the text report. It's only set for a
 	// terminal with color enabled, so logs and pipes get plain text.
 	Color bool
+	// Terminal is set when stdout is a terminal. The summary's hint about
+	// --explain only shows there, so scripts get exactly two lines.
+	Terminal bool
 }

@@ -223,8 +223,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	result := score(m, defaultWeights)
 	md := meta{Version: currentBuild().Version, GeneratedAt: now.UTC()}
-	if f, ok := stdout.(*os.File); ok && isTerminal(f) && colorEnabled() {
-		md.Color = true
+	if f, ok := stdout.(*os.File); ok && isTerminal(f) {
+		md.Terminal, md.Color = true, colorEnabled()
 	}
 	switch {
 	case opts.json:
@@ -233,6 +233,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = renderText(stdout, m, result, md)
 	default:
 		err = renderSummary(stdout, m, result, md)
+		if err == nil {
+			err = renderHint(stdout, md)
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)

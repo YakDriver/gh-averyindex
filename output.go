@@ -20,6 +20,21 @@ func renderSummary(w io.Writer, m Metrics, r Result, md meta) error {
 	return err
 }
 
+// renderHint points a person at the terminal to --explain, dimmed so it
+// fades after the first few runs. It prints nothing when output is piped or
+// redirected.
+func renderHint(w io.Writer, md meta) error {
+	if !md.Terminal {
+		return nil
+	}
+	hint := "--explain for the full report"
+	if md.Color {
+		hint = "\033[2m" + hint + "\033[0m"
+	}
+	_, err := fmt.Fprintf(w, "  %s\n", hint)
+	return err
+}
+
 // parts is the three scores and the reason, such as
 // "Here +20 · Elsewhere +0 · Burden -27 · 41 PRs here, 1 merged, ...".
 func parts(r Result) string {
